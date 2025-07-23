@@ -7,13 +7,13 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
 import os
-path = #yourpathhere
+path = #...
 dir_list = os.listdir(path)
 #print("Files and directories in '", path, "' :")
 # prints all files
 #print(dir_list)
 
-data_f = #yourpathhere
+data_f = #....
 
 gridMET = pd.read_csv(f"{data_f}/gridMET_area_weighted.csv")
 
@@ -128,7 +128,12 @@ finetune_site_input_X_train, finetune_site_input_X_test, finetune_site_input_Y_t
 #compute the mean and normalize using standardscaler.
 x_scaler = StandardScaler()
 y_scaler = StandardScaler()
-#--------fitting to the finetune train section of the data per site------------#
+#convert y to a numpy array
+pretrain_site_input_Y_train = np.array(pretrain_site_input_Y_train)
+pretrain_site_input_Y_test = np.array(pretrain_site_input_Y_test)
+finetune_site_input_Y_train = np.array(finetune_site_input_Y_train)
+finetune_site_input_Y_test = np.array(finetune_site_input_Y_test)
+
 x_scaler.fit(finetune_site_input_X_train)
 y_scaler.fit(finetune_site_input_Y_train.reshape(-1, 1))
 
@@ -137,22 +142,22 @@ pretrain_site_input_X_test = x_scaler.transform(pretrain_site_input_X_test)
 finetune_site_input_X_train = x_scaler.transform(finetune_site_input_X_train)
 finetune_site_input_X_test = x_scaler.transform(finetune_site_input_X_test)
 
-pretrain_site_input_Y_train = y_scaler.transform(pretrain_site_input_Y_train.reshape(-1, 1))
-pretrain_site_input_Y_test = y_scaler.transform(pretrain_site_input_Y_test.reshape(-1, 1))
-finetune_site_input_Y_train = y_scaler.transform(finetune_site_input_Y_train.reshape(-1, 1))
-finetune_site_input_Y_test = y_scaler.transform(finetune_site_input_Y_test.reshape(-1, 1))
+new_pretrain_site_input_Y_train = y_scaler.transform(pretrain_site_input_Y_train.reshape(-1, 1))
+new_spretrain_site_input_Y_test = y_scaler.transform(pretrain_site_input_Y_test.reshape(-1, 1))
+new_finetune_site_input_Y_train = y_scaler.transform(finetune_site_input_Y_train.reshape(-1, 1))
+new_finetune_site_input_Y_test = y_scaler.transform(finetune_site_input_Y_test.reshape(-1, 1))
 #comes out as a numpy array of features for input --> unlabeled
 
-#----------------FORECASTING DATA-----------------#
-#let's make the forecasting data for working with the model:
+#--------fill in missing values----------#
 forecast = pd.read_csv(f"{data_f}/forecast_data_E0.csv")
 forecast_reservoir = pd.read_csv(f"{data_f}/forecast_release_data.csv")
 #replacing missing values and dropping unlabeled sites,
 forecast["max_temp_c"] = forecast["max_temp_c"].interpolate()
-forecast = forecast.dropna(subset=["site_id"])
+forecast = forecast.dropna(subset=["site_id"]).copy()
 #converting both to correct date time format
 forecast["date"] = pd.to_datetime(forecast["date"])
 forecast_reservoir['date'] = pd.to_datetime(forecast_reservoir['date'])
+forecast.head()
 
 #-------combine forecast data---------
 #combine the forecast date with the forecast reservoir data --> For testing the model.
@@ -163,10 +168,27 @@ forecast_site_input_X, forecast_site_input_Y, shape = combine_reservoir_driver_d
                                                             target_variable="max_temp_c" # We know the dwallin_temp_c is the target variable
                                                                                              # from using ".head()"
                                                             )
-
-#--------fill in missing values----------#
-forecast_site_input_X.interpolate(inplace=True)
-forecast_site_input_X.isna().sum()
+#may be dealing with some missing values in the reservoir, so want to interpolate those
+new_forecast_site_input_X = pd.DataFrame(forecast_site_input_X.copy(), columns=forecast_site_input_X.columns)
+new_forecast_site_input_X.interpolate(inplace=True)
+new_forecast_site_input_X.isna().sum()
+print(new_forecast_site_input_X.head())
 #now we want to normalize the values --> this uses the same scaler from the finetune train section to normalize the forecast values.
 forecast_site_input_X = x_scaler.transform(forecast_site_input_X)
 forecast_site_input_Y = y_scaler.transform(forecast_site_input_Y.values.reshape(-1, 1))
+
+#-------- EXPORT------#
+#export the pretraining data:
+#NOTE: CHANGE THE PATH OF EXPORT BASED ON WHERE YOU'RE USING THIS FILE----X
+pd.DataFrame(pretrain_site_input_X_train, columns=pretrain_site_input_X.columns).to_csv(f"{data_f}/pretrain_site_input_X_train.csv", index=False)
+pd.DataFrame(pretrain_site_input_X_test, columns=pretrain_site_input_X.columns).to_csv(f"{data_f}/pretrain_site_input_X_test.csv", index=False)
+pd.DataFrame(pretrain_site_input_Y_train, columns=["dwallin_temp_c"]).to_csv(f"{data_f}/pretrain_site_input_Y_train.csv", index=False)
+pd.DataFrame(pretrain_site_input_Y_test, columns=["dwallin_temp_c"]).to_csv(f"{data_f}/pretrain_site_input_Y_test.csv", index=False)
+#export the finetuning data:
+pd.DataFrame(finetune_site_input_X_train, columns=finetune_site_input_X.columns).to_csv(f"{data_f}/finetune_site_input_X_train.csv", index=False)
+pd.DataFrame(finetune_site_input_X_test, columns=finetune_site_input_X.columns).to_csv(f"{data_f}/finetune_site_input_X_test.csv", index=False)
+pd.DataFrame(finetune_site_input_Y_train, columns=["mean_temp_c"]).to_csv(f"{data_f}/finetune_site_input_Y_train.csv", index=False)
+pd.DataFrame(finetune_site_input_Y_test, columns=["mean_temp_c"]).to_csv(f"{data_f}/finetune_site_input_Y_test.csv", index=False)
+#export the forecasting data:
+pd.DataFrame(forecast_site_input_X, columns=new_forecast_site_input_X.columns).to_csv(f"{data_f}/forecast_site_input_X.csv", index=False)
+pd.DataFrame(forecast_site_input_Y, columns=["max_temp_c"]).to_csv(f"{data_f}/forecast_site_input_Y.csv", index=False)
