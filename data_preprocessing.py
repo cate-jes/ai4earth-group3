@@ -3,6 +3,8 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import datetime as dt
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
 
 import os
 path = #yourpathhere
@@ -56,29 +58,115 @@ gridMET["tmax"] = (gridMET["tmax"] - 32) * (5/9)
 
 #------CODE TO MERGE DATASETS + VISUALIZE ------#
 #Goal: fill in missing data in target temp using dwallin simulated temps, match by site id and date. 
+#Fill in our missing data
 test_target_temp = target_temp_.copy()
 test_dwallin = dwallin_temp.copy()
 print("\n MERGED DATA------------");
-merged_df = pd.merge(target_temp_, dwallin_temp, on=["date", "seg_id_nat"], how="left") # is this the best type of merge for this data?
-print(merged_df.head())
-#so far this looks the closest.
-merged_df["mean_temp_c"] = np.where(merged_df["mean_temp_c"].isna(), merged_df["dwallin_temp_c"], merged_df["mean_temp_c"])
-print(merged_df.head())
-#get rid of nonexistent sites:
-merged_df = merged_df.dropna(subset=['site_id'])
-print(merged_df.head())
+target_temp_filled = pd.merge(target_temp_, dwallin_temp, on=["date", "seg_id_nat"], how="left")
+print(target_temp_filled.head())
+#now that we've merged, replace missing values in mean_temp_c
+target_temp_filled["mean_temp_c"] = np.where(target_temp_filled["mean_temp_c"].isna(), target_temp_filled["dwallin_temp_c"], target_temp_filled["mean_temp_c"])
 #now let's check the merged data:
-print(merged_df.isna().sum());
+print(target_temp_filled.isna().sum());
 
-print("\n Merged dataset number of rows:");
-print(len(merged_df));
-#merged_df[["mean_temp_c", "dwallin_temp_c"]].plot();
-merged_df.plot(x="date", y=["mean_temp_c", "dwallin_temp_c"]);
-merged_df.plot(x="date", y="mean_temp_c");
+test_target_temp.plot(x="date", y="mean_temp_c");
+target_temp_filled.plot(x="date", y="mean_temp_c");
+target_temp_filled.plot(x="date", y=["mean_temp_c", "dwallin_temp_c"]);
+#--------SPLITTING BASED ON TIME-----------#
+# Selecting sections of data based on times, and segregating it into pretraining and finetuning
+gridMET_pretrain = gridMET[(gridMET['date'] >= pretraining_time["start"]) & (gridMET['date'] <= pretraining_time["end"])]
+dwallin_temp = dwallin_temp[(dwallin_temp['date'] >= pretraining_time["start"]) & (dwallin_temp['date'] <= pretraining_time["end"])]
 
-"""
-Current questions: 
-is a left merge the best kind of merge for this dataframe? 
-/what could be causing so many NA values
-how to interpret noncontinuity in the graph?
-"""
+gridMET_finetune = gridMET[(gridMET['date'] >= finetuning_time["start"]) & (gridMET['date'] <= finetuning_time["end"])]
+target_temp_filled = target_temp_filled[(target_temp_filled['date'] >= finetuning_time["start"]) & (target_temp_filled['date'] <= finetuning_time["end"])]
+
+input_data_pretrain = pd.merge(gridMET_pretrain, dwallin_temp, on=["seg_id_nat", "date"], how="right")
+print(input_data_pretrain.head());
+print(len(input_data_pretrain));
+input_data_finetune = pd.merge(gridMET_finetune, target_temp_filled, on=["seg_id_nat", "date"], how="right")
+print(input_data_finetune.head());
+#--------COMBINATION FUNCTION------#
+def combine_reservoir_driver_data(input_data, reservoir_release, site, target_variable=None):
+    # Extracting site-wise input
+    input_ = input_data[input_data["seg_id_nat"] == site]
+
+    # Combining with reservoir based on site type
+    res_columns = []
+    for site_type in sites[site]:
+        print(site_type)
+        input_ = input_.merge(reservoir_release[reservoir_release["reservoir"] == site_type][["release_volume_cms", "date"]], on="date", how="left")
+        input_.rename(columns={"release_volume_cms": f"release_volume_cms_{site_type}"}, inplace=True)
+        res_columns.append(f"release_volume_cms_{site_type}")
+    # Preparing data as input/target
+    site_input_X = input_[["tmin", "tmax", "srad", *res_columns]].copy()
+    if target_variable:
+        site_input_X["ar1"] = input_[target_variable].shift(1)
+    site_input_Y = input_[target_variable]
+
+    # Drop NaN due to shifting time for ar value
+    site_input_X.drop(index=0, inplace=True)
+    site_input_Y.drop(index=0, inplace=True)
+
+    return site_input_X, site_input_Y, site_input_X.shape
+
+site = 1573 # Change value based on what site you would like to preprocess data for!
+
+pretrain_site_input_X, pretrain_site_input_Y, shape = combine_reservoir_driver_data(input_data_pretrain, reservoir_release, site, target_variable="dwallin_temp_c")
+
+
+# Pretrain_site_input_X contains all our inputs, while pretrain_site_input_Y contains our output
+# We can use the shape later as we tinker with our dataset/initialize our models
+print(pretrain_site_input_X.head())
+print(pretrain_site_input_Y.head())
+
+finetune_site_input_X, finetune_site_input_Y, shape = combine_reservoir_driver_data(input_data_finetune, reservoir_release, site, target_variable="mean_temp_c")
+
+#-------------Splitting data into train and test data-----------
+pretrain_site_input_X_train, pretrain_site_input_X_test, pretrain_site_input_Y_train, pretrain_site_input_Y_test = train_test_split(pretrain_site_input_X, pretrain_site_input_Y, test_size=0.2, shuffle=False)
+finetune_site_input_X_train, finetune_site_input_X_test, finetune_site_input_Y_train, finetune_site_input_Y_test = train_test_split(finetune_site_input_X, finetune_site_input_Y, test_size=0.2, shuffle=False)
+
+#compute the mean and normalize using standardscaler.
+x_scaler = StandardScaler()
+y_scaler = StandardScaler()
+#--------fitting to the finetune train section of the data per site------------#
+x_scaler.fit(finetune_site_input_X_train)
+y_scaler.fit(finetune_site_input_Y_train.reshape(-1, 1))
+
+pretrain_site_input_X_train = x_scaler.transform(pretrain_site_input_X_train)
+pretrain_site_input_X_test = x_scaler.transform(pretrain_site_input_X_test)
+finetune_site_input_X_train = x_scaler.transform(finetune_site_input_X_train)
+finetune_site_input_X_test = x_scaler.transform(finetune_site_input_X_test)
+
+pretrain_site_input_Y_train = y_scaler.transform(pretrain_site_input_Y_train.reshape(-1, 1))
+pretrain_site_input_Y_test = y_scaler.transform(pretrain_site_input_Y_test.reshape(-1, 1))
+finetune_site_input_Y_train = y_scaler.transform(finetune_site_input_Y_train.reshape(-1, 1))
+finetune_site_input_Y_test = y_scaler.transform(finetune_site_input_Y_test.reshape(-1, 1))
+#comes out as a numpy array of features for input --> unlabeled
+
+#----------------FORECASTING DATA-----------------#
+#let's make the forecasting data for working with the model:
+forecast = pd.read_csv(f"{data_f}/forecast_data_E0.csv")
+forecast_reservoir = pd.read_csv(f"{data_f}/forecast_release_data.csv")
+#replacing missing values and dropping unlabeled sites,
+forecast["max_temp_c"] = forecast["max_temp_c"].interpolate()
+forecast = forecast.dropna(subset=["site_id"])
+#converting both to correct date time format
+forecast["date"] = pd.to_datetime(forecast["date"])
+forecast_reservoir['date'] = pd.to_datetime(forecast_reservoir['date'])
+
+#-------combine forecast data---------
+#combine the forecast date with the forecast reservoir data --> For testing the model.
+forecast_site_input_X, forecast_site_input_Y, shape = combine_reservoir_driver_data(
+                                                            forecast,
+                                                            forecast_reservoir,
+                                                            site,
+                                                            target_variable="max_temp_c" # We know the dwallin_temp_c is the target variable
+                                                                                             # from using ".head()"
+                                                            )
+
+#--------fill in missing values----------#
+forecast_site_input_X.interpolate(inplace=True)
+forecast_site_input_X.isna().sum()
+#now we want to normalize the values --> this uses the same scaler from the finetune train section to normalize the forecast values.
+forecast_site_input_X = x_scaler.transform(forecast_site_input_X)
+forecast_site_input_Y = y_scaler.transform(forecast_site_input_Y.values.reshape(-1, 1))
