@@ -136,11 +136,11 @@ finetune_site_input_Y_test = np.array(finetune_site_input_Y_test)
 
 x_scaler.fit(finetune_site_input_X_train)
 y_scaler.fit(finetune_site_input_Y_train.reshape(-1, 1))
-
-pretrain_site_input_X_train = x_scaler.transform(pretrain_site_input_X_train)
-pretrain_site_input_X_test = x_scaler.transform(pretrain_site_input_X_test)
-finetune_site_input_X_train = x_scaler.transform(finetune_site_input_X_train)
-finetune_site_input_X_test = x_scaler.transform(finetune_site_input_X_test)
+#CHANGES SO THAT IT IS NOT NORMALIZED TWICE
+new_pretrain_site_input_X_train = x_scaler.transform(pretrain_site_input_X_train)
+new_pretrain_site_input_X_test = x_scaler.transform(pretrain_site_input_X_test)
+new_finetune_site_input_X_train = x_scaler.transform(finetune_site_input_X_train)
+new_finetune_site_input_X_test = x_scaler.transform(finetune_site_input_X_test)
 
 new_pretrain_site_input_Y_train = y_scaler.transform(pretrain_site_input_Y_train.reshape(-1, 1))
 new_spretrain_site_input_Y_test = y_scaler.transform(pretrain_site_input_Y_test.reshape(-1, 1))
