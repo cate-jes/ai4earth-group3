@@ -27,6 +27,11 @@ dwallin_temp = pd.read_csv(f"{data_f}/dwallin_stream_preds.csv")
 
 # The real-world stream temperature values are contained
 target_temp = pd.read_csv(f"{data_f}/temperature_observations_forecast_sites.csv")
+
+forecast = pd.read_csv(f"{data_f}/forecast_data_E0.csv")
+
+forecast_reservoir = pd.read_csv(f"{data_f}/forecast_release_data.csv")
+
 #site breakdown
 sites = {
     1573: ["Cannonsville", "Pepacton"],
@@ -41,84 +46,104 @@ pretraining_time = { "start": '1985-05-01', "end": '2020-04-01'}
 finetuning_time = { "start": '1985-05-01', "end": '2021-04-14'}
 forecasting_time = {"start": '2021-04-16', "end": '2021-09-30'}
 
-gridMET = gridMET[gridMET["seg_id_nat"].isin(sites.keys())] #narrowing down gridMET to only containing seg_id that matches
-target_temp_ = target_temp[target_temp["seg_id_nat"].isin(sites.keys())]
-dwallin_temp = dwallin_temp[dwallin_temp["seg_id_nat"].isin(sites.keys())]
-
-# Ensuring all dates are of the same type
-gridMET = gridMET.rename(columns={"time": "date"})
-gridMET["date"] = pd.to_datetime(gridMET["date"])
-dwallin_temp["date"] = pd.to_datetime(dwallin_temp["date"])
-target_temp_["date"] = pd.to_datetime(target_temp_["date"]).dt.tz_localize(None)
-reservoir_release["date"] = pd.to_datetime(reservoir_release["date"])
-
-# Converting values from fahrenheit to celsius
-gridMET["tmin"] = (gridMET["tmin"] -32) * (5/9)
-gridMET["tmax"] = (gridMET["tmax"] - 32) * (5/9)
 
 #-----PREPROCESSING INPUT / ADDING MISSING DATA--------#
+#takes in sites, datafiles and forecasting/finetuning times
+def preprocess_data(gridMET, target_temp, dwallin_temp, sites, finetuning_time, forecasting_time):
+  gridMET = gridMET[gridMET["seg_id_nat"].isin(sites.keys())] #narrowing down gridMET to only containing seg_id that matches
+  target_temp_ = target_temp[target_temp["seg_id_nat"].isin(sites.keys())]
+  dwallin_temp = dwallin_temp[dwallin_temp["seg_id_nat"].isin(sites.keys())]
+  
+  #datetime conversions
+  gridMET = gridMET.rename(columns={"time": "date"})
+  gridMET["date"] = pd.to_datetime(gridMET["date"])
+  dwallin_temp["date"] = pd.to_datetime(dwallin_temp["date"])
+  target_temp_["date"] = pd.to_datetime(target_temp_["date"]).dt.tz_localize(None)
+  reservoir_release["date"] = pd.to_datetime(reservoir_release["date"])
+  
+  # Converting values from fahrenheit to celsius
+  gridMET["tmin"] = (gridMET["tmin"] -32) * (5/9)
+  gridMET["tmax"] = (gridMET["tmax"] - 32) * (5/9)
+  
+  #Fill in missing values in target temp
+  test_target_temp = target_temp_.copy()
+  test_dwallin = dwallin_temp.copy()
+  target_temp_filled = pd.merge(test_target_temp, test_dwallin, on=["date", "seg_id_nat"], how="left")
+  
+  #now that we've merged, replace missing values in mean_temp_c
+  target_temp_filled["mean_temp_c"] = np.where(target_temp_filled["mean_temp_c"].isna(), target_temp_filled["dwallin_temp_c"], target_temp_filled["mean_temp_c"])
+  
+  #Combine finetune data with target temp
+  gridMET_finetune = gridMET[(gridMET['date'] >= finetuning_time["start"]) & (gridMET['date'] <= finetuning_time["end"])]
+  target_temp_filled = target_temp_filled[(target_temp_filled['date'] >= finetuning_time["start"]) & (target_temp_filled['date'] <= finetuning_time["end"])]
+  input_data_finetune = pd.merge(gridMET_finetune, target_temp_filled, on=["seg_id_nat", "date"], how="right")
 
-#fill in missing values in target temperature---------#
-#Goal: fill in missing data in target temp using dwallin simulated temps, match by site id and date. 
-#Fill in our missing data
-test_target_temp = target_temp_.copy()
-test_dwallin = dwallin_temp.copy()
-#print("\n MERGED DATA------------");
-target_temp_filled = pd.merge(target_temp_, dwallin_temp, on=["date", "seg_id_nat"], how="left")
-#print(target_temp_filled.head())
-#now that we've merged, replace missing values in mean_temp_c
-target_temp_filled["mean_temp_c"] = np.where(target_temp_filled["mean_temp_c"].isna(), target_temp_filled["dwallin_temp_c"], target_temp_filled["mean_temp_c"])
-#now let's check the merged data:
-#print(target_temp_filled.isna().sum());
+  #Add encoding of site ids
+  ohe = OneHotEncoder()
+  ohe.fit(input_data_finetune[["seg_id_nat"]])
 
-#Split based on time-----------#
-# Selecting sections of data based on times, and segregating it into pretraining and finetuning
-gridMET_pretrain = gridMET[(gridMET['date'] >= pretraining_time["start"]) & (gridMET['date'] <= pretraining_time["end"])]
-dwallin_temp = dwallin_temp[(dwallin_temp['date'] >= pretraining_time["start"]) & (dwallin_temp['date'] <= pretraining_time["end"])]
+  ohe_df = pd.DataFrame(ohe.transform(input_data_finetune[["seg_id_nat"]]).toarray(), columns=ohe.get_feature_names_out())
+  input_data_finetune = pd.concat([input_data_finetune, ohe_df], axis=1)
 
-gridMET_finetune = gridMET[(gridMET['date'] >= finetuning_time["start"]) & (gridMET['date'] <= finetuning_time["end"])]
-target_temp_filled = target_temp_filled[(target_temp_filled['date'] >= finetuning_time["start"]) & (target_temp_filled['date'] <= finetuning_time["end"])]
+  return input_data_finetune
 
-input_data_pretrain = pd.merge(gridMET_pretrain, dwallin_temp, on=["seg_id_nat", "date"], how="right")
-print(input_data_pretrain.head());
-print(len(input_data_pretrain));
-input_data_finetune = pd.merge(gridMET_finetune, target_temp_filled, on=["seg_id_nat", "date"], how="right")
-print(input_data_finetune.head());
+#prepare forecasting data for the model
 
-#------------FORECAST PREPARATION------------#
+
+  #replacing missing values and dropping unlabeled sites,
+  forecast["max_temp_c"] = forecast["max_temp_c"].interpolate()
+
+  #converting both to correct date time format
+  forecast["date"] = pd.to_datetime(forecast["date"])
+  forecast_reservoir['date'] = pd.to_datetime(forecast_reservoir['date'])
+  
+  #want to start 30 days before, use the pretraining from gridmet
+  forecasting_time = { "start": '2021-03-15', "end": '2021-04-14'}
+  #set them to match
+  gridMET_forecast = input_data.drop(columns=["prcp", "humidity", "rhmax", "rhmin", "ws", "subseg_id", "in_time_holdout", "in_space_holdout", "test", "dwallin_temp_c"]).copy()
+  forecast = forecast.drop(columns=["cd", "site_name"])
+  new_gridMET_forecast = gridMET_forecast[(gridMET_forecast['date'] >= forecasting_time["start"]) & (gridMET_forecast['date'] <= forecasting_time["end"])]
+  
+  # Combine gridMET_forecast and forecast (gridMET comes first)
+  full_forecast = pd.concat([new_gridMET_forecast, forecast], ignore_index=True)
+
+  #sort by date if you want to ensure time order
+  full_forecast = full_forecast.sort_values(by="date").reset_index(drop=True)
+  return full_forecast
 
 #let's make the forecasting data for working with the model:
-forecast = pd.read_csv(f"{data_f}/forecast_data_E0.csv")
-forecast_reservoir = pd.read_csv(f"{data_f}/forecast_release_data.csv")
-#replacing missing values and dropping unlabeled sites,
-forecast["max_temp_c"] = forecast["max_temp_c"].interpolate()
-forecast["min_temp_c"] = forecast["min_temp_c"].interpolate()
-forecast["mean_temp_c"] = forecast["mean_temp_c"].interpolate()
-forecast = forecast.dropna(subset=["site_id"]).copy()
-#print(forecast.isna().sum())
-#converting both to correct date time format
-forecast["date"] = pd.to_datetime(forecast["date"])
-forecast_reservoir['date'] = pd.to_datetime(forecast_reservoir['date'])
+def preprocess_forecast_data(input_data, forecast, forecast_reservoir, reservoir_release): 
 
-#Add previous 30 days of input----------------#
-forecasting_time = { "start": '2021-03-15', "end": '2021-04-14'}
-#set them to match
-gridMET_forecast = input_data_finetune.drop(columns=["prcp", "humidity", "rhmax", "rhmin", "ws", "subseg_id", "in_time_holdout", "in_space_holdout", "test", "dwallin_temp_c"]).copy()
-forecast = forecast.drop(columns=["cd", "site_name"])
-new_gridMET_forecast = gridMET_forecast[(gridMET_forecast['date'] >= forecasting_time["start"]) & (gridMET_forecast['date'] <= forecasting_time["end"])]
-print("here's the forecast")
-print(forecast.head())
-print("here's the gridMET")
-print(new_gridMET_forecast.head())
-# Combine gridMET_forecast and forecast (gridMET comes first)
-full_forecast = pd.concat([new_gridMET_forecast, forecast], ignore_index=True)
+  #replacing missing values and dropping unlabeled sites,
+  forecast["max_temp_c"] = forecast["max_temp_c"].interpolate()
+  
+  #converting both to correct date time format
+  forecast["date"] = pd.to_datetime(forecast["date"])
+  forecast_reservoir['date'] = pd.to_datetime(forecast_reservoir['date'])
+  
+  #want to start 30 days before, use the pretraining from gridmet
+  forecasting_time = { "start": '2021-03-15', "end": '2021-04-14'}
+  
+  #Append 30 days of gridmet data to forecast data
+  gridMET_forecast = input_data.drop(columns=["prcp", "humidity", "rhmax", "rhmin", "ws", "subseg_id", "in_time_holdout", "in_space_holdout", "test", "dwallin_temp_c"]).copy()
+  forecast = forecast.drop(columns=["cd", "site_name"])
+  new_gridMET_forecast = gridMET_forecast[(gridMET_forecast['date'] >= forecasting_time["start"]) & (gridMET_forecast['date'] <= forecasting_time["end"])]
+  # Combine gridMET_forecast and forecast (gridMET comes first)
+  full_forecast = pd.concat([new_gridMET_forecast, forecast], ignore_index=True)
+  #sort by date if you want to ensure time order
+  full_forecast = full_forecast.sort_values(by="date").reset_index(drop=True)
+  
+  #Append 30 days of reservoir_release to forecast release
+  first_month_release = reservoir_release[(reservoir_release['date'] >= forecasting_time["start"]) & (reservoir_release['date'] <= forecasting_time["end"])]
 
-#sort by date if you want to ensure time order
-full_forecast = full_forecast.sort_values(by="date").reset_index(drop=True)
+  full_reservoir_release = pd.concat([first_month_release, forecast_reservoir], ignore_index=True).drop_duplicates()
+  full_reservoir_release = full_reservoir_release.sort_values(by="date").reset_index(drop=True)
+  print("here's the reservoir release")
+  print(full_reservoir_release.head())
 
-#--------FUNCTIONS------#
+  return full_forecast, full_reservoir_release
 
-# COMBINE DRIVER AND RESERVOIR DATA
+# COMBINE DRIVER AND RESERVOIR DATA FUNCTION ------#
 def combine_reservoir_driver_data(input_data, reservoir_release, site, target_variable=None):
     # Extracting site-wise input
     input_ = input_data[input_data["seg_id_nat"] == site]
@@ -160,11 +185,14 @@ def process_data(pretrain_input_data, finetune_input_data, forecast_input_data, 
   npy_finetune_site_input_Y_train = np.array(finetune_site_input_Y_train)
   npy_finetune_site_input_Y_test = np.array(finetune_site_input_Y_test)
 
+  #normalize forecast data:
+  npy_forecast_site_input_Y = np.array(forecast_input_Y)
+
   #fit our scaler:
   x_scaler.fit(finetune_site_input_X_train)
   y_scaler.fit(npy_finetune_site_input_Y_train.reshape(-1, 1))
 
-  #want to return our mean 
+  #want to return our mean
   new_pretrain_site_input_X_train = x_scaler.transform(pretrain_site_input_X_train)
   new_pretrain_site_input_X_test = x_scaler.transform(pretrain_site_input_X_test)
   new_finetune_site_input_X_train = x_scaler.transform(finetune_site_input_X_train)
@@ -174,21 +202,28 @@ def process_data(pretrain_input_data, finetune_input_data, forecast_input_data, 
   new_pretrain_site_input_Y_test = y_scaler.transform(npy_pretrain_site_input_Y_test.reshape(-1, 1))
   new_finetune_site_input_Y_train = y_scaler.transform(npy_finetune_site_input_Y_train.reshape(-1, 1))
   new_finetune_site_input_Y_test = y_scaler.transform(npy_finetune_site_input_Y_test.reshape(-1, 1))
+  #forecast normalization
+  forecast_input_X.interpolate(method="linear", direction="forward", inplace=True)
+  
+  new_forecast_site_input_X = x_scaler.transform(forecast_input_X)
+  new_forecast_site_input_Y = y_scaler.transform(npy_forecast_site_input_Y.reshape(-1, 1))
 
-  #comes out as a numpy array of features for input --> unlabeled
-  #save the data
-  np.savez(f"{data_f}/{site}_input_X", pretrain_train=new_pretrain_site_input_X_train, pretrain_test=new_pretrain_site_input_X_test, finetune_train=new_finetune_site_input_X_train, finetune_test=new_finetune_site_input_X_test, x_scaled_means=x_scaler.mean_, x_scaled_stds=x_scaler.scale_)
-  np.savez(f"{data_f}/{site}_input_Y", pretrain_train=new_pretrain_site_input_Y_train, pretrain_test=new_pretrain_site_input_Y_test, finetune_train=new_finetune_site_input_Y_train, finetune_test=new_finetune_site_input_Y_test, y_scaled_mean=y_scaler.mean_, y_scaled_std=y_scaler.scale_)
+  return (
+    new_pretrain_site_input_X_train, new_pretrain_site_input_X_test,
+    new_finetune_site_input_X_train, new_finetune_site_input_X_test,
+    new_pretrain_site_input_Y_train, new_pretrain_site_input_Y_test,
+    new_finetune_site_input_Y_train, new_finetune_site_input_Y_test,
+    new_forecast_site_input_X, new_forecast_site_input_Y,
+    x_scaler, y_scaler, shape
+  )
 
-#doesn't return a value, but creates two files site_input_X, and site_input_Y that contain the pretraining and finetuning train and test, as well as the x_scaler means and standard devations
-#HOW TO ACCESS THE VALUES:
-#use the labels to get the array out of the file like so
-#npzfile = np.load(outfile)
-#sorted(npzfile.files)
-#['x_label', 'y_label']
-#npzfile['x_label']
-#array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]) the array x
 
 #-----------DATA PROCESSING--------#
-site = 1573 # Change value based on what site you would like to preprocess data for!
-process_data(input_data_pretrain, input_data_finetune, full_forecast, reservoir_release, forecast_reservoir, site, "dwallin_temp_c", "max_temp_c", "max_temp_c")
+#run for one site
+site = 1573
+#preprocess data:
+input_data_pretrain, input_data_finetune = preprocess_data(gridMET, target_temp, dwallin_temp, sites, finetuning_time, forecasting_time)
+#process forecast:
+full_forecast, full_forecast_reservoir = preprocess_forecast_data(input_data_finetune, forecast, forecast_reservoir, reservoir_release)
+#process the data:
+new_pretrain_site_input_X_train, new_pretrain_site_input_X_test, new_finetune_site_input_X_train, new_finetune_site_input_X_test, new_pretrain_site_input_Y_train, new_pretrain_site_input_Y_test, new_finetune_site_input_Y_train, new_finetune_site_input_Y_test, new_forecast_site_input_X, new_forecast_site_input_Y, x_scaler, y_scaler, shape = process_data(input_data_pretrain, input_data_finetune, full_forecast, reservoir_release, full_forecast_reservoir, site, "dwallin_temp_c", "max_temp_c", "max_temp_c")
