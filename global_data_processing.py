@@ -73,7 +73,7 @@ def preprocess_data(gridMET, target_temp, dwallin_temp, sites, finetuning_time, 
   target_temp_filled = pd.merge(test_target_temp, test_dwallin, on=["date", "seg_id_nat"], how="left")
   
   #now that we've merged, replace missing values in mean_temp_c
-  target_temp_filled["mean_temp_c"] = np.where(target_temp_filled["mean_temp_c"].isna(), target_temp_filled["dwallin_temp_c"], target_temp_filled["mean_temp_c"])
+  target_temp_filled["max_temp_c"] = np.where(target_temp_filled["max_temp_c"].isna(), target_temp_filled["dwallin_temp_c"], target_temp_filled["max_temp_c"])
   
   #Combine finetune data with target temp
   gridMET_finetune = gridMET[(gridMET['date'] >= finetuning_time["start"]) & (gridMET['date'] <= finetuning_time["end"])]
@@ -148,12 +148,30 @@ def combine_global_data(input_data, reservoir_release, target_variable=None):
 #SCALE AND EXPORT FUNCTION-------------#
 #proces data site-wise, saves the data in a npz file, returns the mean and std of the standardization data to be added to a csv file
 #proces data site-wise, saves the data in a npz file, returns the mean and std of the standardization data to be added to a csv file
+#process data site-wise, saves the data in a npz file, returns the mean and std of the standardization data to be added to a csv file
 def process_global_data(finetune_input_data, forecast_input_data, reservoir_release, forecast_release,
-                     finetune_target, forecast_target):
+                     finetune_target, forecast_target, site):
+  
+
   finetune_input_X, finetune_input_Y, shape = combine_global_data(finetune_input_data, reservoir_release, finetune_target)
   forecast_input_X, forecast_input_Y, shape = combine_global_data(forecast_input_data, forecast_release, forecast_target)
   finetune_input_X_train, finetune_input_X_test, finetune_input_Y_train, finetune_input_Y_test = train_test_split(finetune_input_X, finetune_input_Y, test_size=0.2, shuffle=False)
+  print(forecast_input_X.head())
+  
+  #site from one hot encoding
+  def get_site_column(site_number: int, df: pd.DataFrame) -> str:
+    column_name = f"seg_id_nat_{site_number}"
+    if column_name in df.columns:
+        return column_name
+    else:
+        raise ValueError(f"Site {site_number} not found in DataFrame columns.")
+  
+  column_name = get_site_column(site, forecast_input_X)
+  site_active_rows = forecast_input_X[forecast_input_X[column_name] == 1]
 
+  print("---------filtered forecast data---------")
+  print(site_active_rows.describe())
+  
   x_scaler = StandardScaler()
   y_scaler = StandardScaler()
   #convert y to a numpy array
@@ -162,8 +180,7 @@ def process_global_data(finetune_input_data, forecast_input_data, reservoir_rele
 
   #convert forecast Y
   npy_forecast_input_Y = np.array(forecast_input_Y)
-
-  #fit our scaler:
+  
   x_scaler.fit(finetune_input_X_train)
   y_scaler.fit(npy_finetune_input_Y_train.reshape(-1, 1))
 
@@ -174,15 +191,13 @@ def process_global_data(finetune_input_data, forecast_input_data, reservoir_rele
   new_finetune_input_Y_train = y_scaler.transform(npy_finetune_input_Y_train.reshape(-1, 1))
   new_finetune_input_Y_test = y_scaler.transform(npy_finetune_input_Y_test.reshape(-1, 1))
 
-  #forecast
-  new_forecast_input_X = x_scaler.transform(forecast_input_X)
+  new_forecast_input_X = x_scaler.transform(site_active_rows)
   new_forecast_input_Y = y_scaler.transform(npy_forecast_input_Y.reshape(-1, 1))
-  
+
   #return
-  #np.savez(f"{data_f}/global_input_X", finetune_train=new_finetune_input_X_train, finetune_test=new_finetune_input_X_test, forecast_X=new_forecast_input_X, x_scaled_means=x_scaler.mean_, x_scaled_stds=x_scaler.scale_ )
-  #np.savez(f"{data_f}/global_input_Y", finetune_train=new_finetune_input_Y_train, finetune_test=new_finetune_input_Y_test, forecast_Y=new_forecast_input_Y, y_scaled_mean=y_scaler.mean_, y_scaled_std=y_scaler.scale_)
   return (new_finetune_input_X_train, new_finetune_input_X_test, new_finetune_input_Y_train, new_finetune_input_Y_test, 
           new_forecast_input_X, new_forecast_input_Y, x_scaler, y_scaler, shape )
+
 
 def main():
     #-----------DATA PROCESSING--------#
