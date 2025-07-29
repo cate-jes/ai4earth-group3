@@ -4,16 +4,16 @@ import numpy as np
 import matplotlib.pyplot as plt
 import datetime as dt
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
 
 import os
-path = #...
+path = './data'
 dir_list = os.listdir(path)
 #print("Files and directories in '", path, "' :")
 # prints all files
 #print(dir_list)
 
-data_f = #....
+data_f = path
 
 gridMET = pd.read_csv(f"{data_f}/gridMET_area_weighted.csv")
 
@@ -184,10 +184,15 @@ def process_global_data(finetune_input_data, forecast_input_data, reservoir_rele
   return (new_finetune_input_X_train, new_finetune_input_X_test, new_finetune_input_Y_train, new_finetune_input_Y_test, 
           new_forecast_input_X, new_forecast_input_Y, x_scaler, y_scaler, shape )
 
-#-----------DATA PROCESSING--------#
-#process input data
-input_data_finetune = preprocess_data(gridMET, target_temp, dwallin_temp, sites, finetuning_time, forecasting_time)
-#process forecast data
-full_forecast, full_reservoir_release = preprocess_forecast_data(input_data_finetune, forecast, forecast_reservoir, reservoir_release)
-#combine data and export it.
-new_finetune_input_X_train, new_finetune_input_X_test, new_finetune_input_Y_train, new_finetune_input_Y_test, new_forecast_input_X, new_forecast_input_Y, x_scaler, y_scaler, shape = process_global_data(input_data_finetune, full_forecast, reservoir_release, full_reservoir_release, "mean_temp_c", "max_temp_c")
+def main():
+    #-----------DATA PROCESSING--------#
+    #process input data
+    input_data_finetune = preprocess_data(gridMET, target_temp, dwallin_temp, sites, finetuning_time, forecasting_time)
+    #process forecast data
+    full_forecast, full_reservoir_release = preprocess_forecast_data(input_data_finetune, forecast, forecast_reservoir, reservoir_release)
+    #combine data and export it.
+    new_finetune_input_X_train, new_finetune_input_X_test, new_finetune_input_Y_train, new_finetune_input_Y_test, new_forecast_input_X, new_forecast_input_Y, x_scaler, y_scaler, shape = process_global_data(
+        input_data_finetune, full_forecast, reservoir_release, full_reservoir_release, "mean_temp_c", "max_temp_c"
+    )
+    
+    return new_finetune_input_X_train, new_finetune_input_X_test, new_finetune_input_Y_train, new_finetune_input_Y_test, new_forecast_input_X, new_forecast_input_Y, x_scaler, y_scaler, shape

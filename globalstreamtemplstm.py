@@ -6,6 +6,9 @@ import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 import matplotlib.pyplot as plt
 import seaborn as sns
+from sklearn.preprocessing import StandardScaler
+
+import global_data_processing
 
 # Utility: reshape data for LSTM
 def reshape_data(x, y, seq_length):
@@ -38,12 +41,20 @@ def plot_results(date_range, observations, predictions, title, rmse):
 
 # LSTM Model
 class GlobalStreamTempLSTM(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers=1, dropout=0.0):
+    def __init__(self, input_size, hidden_size, num_layers=1, dropout=0.0, y_scaler=None):
         super().__init__()
         self.lstm = nn.LSTM(input_size=input_size, hidden_size=hidden_size,
                             num_layers=num_layers, batch_first=True, dropout=dropout)
         self.dropout = nn.Dropout(p=dropout)
         self.fc = nn.Linear(hidden_size, 1)
+        # Store the y_scaler for denormalization of predictions
+        self.y_scaler = y_scaler
+        
+    def denormalize_predictions(self, normalized_data):
+        """Convert normalized predictions/targets back to original temperature scale"""
+        if self.y_scaler is not None:
+            return self.y_scaler.inverse_transform(normalized_data.reshape(-1, 1)).squeeze()
+        return normalized_data
         
     def forward(self, x):
         _, (h_n, _) = self.lstm(x)
@@ -61,24 +72,34 @@ class GlobalStreamTempLSTM(nn.Module):
                 loss = loss_func(preds, Yb)
                 loss.backward()
                 optimizer.step()
-            print(f"Epoch {epoch} done.")
+            rmse_value = np.sqrt(loss.item())
+            print(f"Epoch {epoch} done. - Test RMSE: {rmse_value:.3f}")
 
     def evaluate(self, test_loader, device, date_range=None, title="Global Model"):
         self.eval()
-        preds, trues = [], []
+        preds, obs = [], []
         with torch.no_grad():
             for Xb, Yb in test_loader:
                 Xb = Xb.to(device)
-                pred = self(Xb).cpu().numpy()
+                pred = self(Xb).cpu().numpy()  
                 preds.append(pred)
-                trues.append(Yb.numpy())
+                obs.append(Yb.numpy())  
+        
+        # Concatenate all batch results
         preds = np.concatenate(preds).squeeze()
-        trues = np.concatenate(trues).squeeze()
-        rmse = np.sqrt(np.mean((preds - trues) ** 2))
+        obs = np.concatenate(obs).squeeze()
+        
+        # Calculate RMSE 
+        rmse = np.sqrt(np.mean((preds - obs) ** 2))
         print(f"Test RMSE: {rmse:.3f}")
+        
+        preds_denorm = self.denormalize_predictions(preds)
+        obs_denorm = self.denormalize_predictions(obs)
+        
         if date_range is not None:
-            plot_results(date_range, trues, preds, title=title, rmse=rmse)
-        return preds, trues, rmse
+            # Plot denormalized values for meaningful visualization
+            plot_results(date_range, obs_denorm, preds_denorm, title=title, rmse=rmse)
+        return preds_denorm, obs_denorm, rmse
 
     def forecast(self, fc_X, fc_Y, seq_len, batch_size, device, start_date, title="Global Forecast"):
         # Debug: Check for NaNs/Infs in forecast input data
@@ -96,14 +117,15 @@ class GlobalStreamTempLSTM(nn.Module):
         print("fc_X_seq min:", np.nanmin(fc_X_seq), "max:", np.nanmax(fc_X_seq))
         print("fc_Y_seq min:", np.nanmin(fc_Y_seq), "max:", np.nanmax(fc_Y_seq))
         
-        # Remove rows with NaNs
+        # Remove rows with NaNs - entire sequences are removed if any value is missing
         mask = ~np.isnan(fc_X_seq).any(axis=(1,2)) & ~np.isnan(fc_Y_seq).any(axis=1)
-        X_train = fc_X_seq[mask]
-        Y_train = fc_Y_seq[mask].squeeze()
+        X_train = fc_X_seq[mask]  # Keep only clean sequences
+        Y_train = fc_Y_seq[mask].squeeze()  # Remove singleton dimensions
         
         fc_X_seq= X_train
         fc_Y_seq = Y_train
 
+        # Create data loader for forecast sequences
         fc_ds = TensorDataset(torch.from_numpy(fc_X_seq).float(), torch.from_numpy(fc_Y_seq).float())
         fc_loader = DataLoader(fc_ds, batch_size=batch_size, shuffle=False)
         self.eval()
@@ -111,65 +133,94 @@ class GlobalStreamTempLSTM(nn.Module):
         with torch.no_grad():
             for Xb, Yb in fc_loader:
                 Xb = Xb.to(device)
-                yhat = self(Xb)
+                yhat = self(Xb)  # Get normalized predictions
                 # Debug: Check for NaNs in model output per batch
                 if torch.isnan(yhat).any():
                     print("NaN in model output for this batch!")
                 pred_list.append(yhat.cpu().numpy())
                 obs_list.append(Yb.numpy())
+        
+        # Concatenate all batch results (still normalized)
         preds = np.concatenate(pred_list).squeeze()
         obs   = np.concatenate(obs_list).squeeze()
         print("Any NaN in preds?", np.isnan(preds).any())
         print("Any NaN in obs?", np.isnan(obs).any())
         print("preds shape:", preds.shape, "obs shape:", obs.shape)
+        
+        # Calculate RMSE on normalized data
         rmse_fc = np.sqrt(np.mean((preds - obs) ** 2))
         print(f"7-day Forecast RMSE: {rmse_fc:.3f}")
-        forecast_dates = pd.date_range(start=start_date, periods=len(preds), freq="D")
-        plot_results(forecast_dates, obs, preds, title=title, rmse=rmse_fc)
-        return preds, obs, rmse_fc
+        
+        # Denormalize predictions and observations for interpretable results
+        preds_denorm = self.denormalize_predictions(preds)
+        obs_denorm = self.denormalize_predictions(obs)
+        
+        # Create date range for plotting
+        forecast_dates = pd.date_range(start=start_date, periods=len(preds_denorm), freq="D")
+        # Plot denormalized values for meaningful visualization
+        plot_results(forecast_dates, obs_denorm, preds_denorm, title=title, rmse=rmse_fc)
+        return preds_denorm, obs_denorm, rmse_fc
 
-if __name__ == "__main__":
+def main():
     DATA_DIR = "data"
-    SEQ_LEN = 10
+    SEQ_LEN = 30
     BATCH_SIZE = 64
     HIDDEN_SIZE = 64
     N_EPOCHS = 30
     LEARNING_RATE = 0.001
+    
+    (X_train, X_test, 
+    Y_train, Y_test, 
+    fc_X_df, fc_Y_df, x_scaler, 
+    y_scaler, shape) = global_data_processing.main()
 
-    # Load global data
-    X_train = pd.read_csv(f"{DATA_DIR}\\finetune_global_X_train.csv").values
-    Y_train = pd.read_csv(f"{DATA_DIR}\\finetune_global_Y_train.csv").values.squeeze()
-    X_test  = pd.read_csv(f"{DATA_DIR}\\finetune_global_input_X_test.csv").values
-    Y_test  = pd.read_csv(f"{DATA_DIR}\\finetune_global_Y_test.csv").values.squeeze()
+    # # Load global data (already normalized from global_data_processing.py)
+    # X_train = pd.read_csv(f"{DATA_DIR}\\finetune_global_X_train.csv").values
+    # Y_train = pd.read_csv(f"{DATA_DIR}\\finetune_global_Y_train.csv").values.squeeze()
+    # X_test  = pd.read_csv(f"{DATA_DIR}\\finetune_global_input_X_test.csv").values
+    # Y_test  = pd.read_csv(f"{DATA_DIR}\\finetune_global_Y_test.csv").values.squeeze()
 
-    # Build sequences
+    # # Create y_scaler to match the normalization used in global_data_processing.py
+    # # We need to fit it on the original (pre-normalized) training data to get correct parameters
+    # # Since we don't have access to original data, we'll create a scaler from normalized data
+    # # This is a workaround - ideally the scaler should be saved from preprocessing
+    # y_scaler = StandardScaler()
+    # y_scaler.fit(Y_train.reshape(-1, 1))  # Fit on normalized training targets
+    
+    # Build sequences for LSTM input
     X_train_seq, Y_train_seq = reshape_data(X_train, Y_train, SEQ_LEN)
     X_test_seq,  Y_test_seq  = reshape_data(X_test,  Y_test,  SEQ_LEN)
 
-    # DataLoaders
+    # Create PyTorch DataLoaders for batch processing
     train_ds = TensorDataset(torch.from_numpy(X_train_seq).float(), torch.from_numpy(Y_train_seq).float())
     test_ds  = TensorDataset(torch.from_numpy(X_test_seq).float(), torch.from_numpy(Y_test_seq).float())
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
     test_loader  = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False)
 
-    # Model, optimizer, loss
+    # Initialize model with y_scaler for denormalization, optimizer, and loss function
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = GlobalStreamTempLSTM(input_size=X_train_seq.shape[2], hidden_size=HIDDEN_SIZE).to(device)
+    model = GlobalStreamTempLSTM(input_size=X_train_seq.shape[2], hidden_size=HIDDEN_SIZE, y_scaler=y_scaler).to(device)
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
     loss_func = nn.MSELoss()
 
-    # Training
+    # Training phase
     model.fit(train_loader, optimizer, loss_func, device, n_epochs=N_EPOCHS)
 
-    # Evaluation
+    # Evaluation phase with denormalized results
     date_range = pd.date_range(start='2021-04-16', periods=len(Y_test_seq), freq='D')
-    model.evaluate(test_loader, device, date_range=date_range, title="Global Model")
+    preds_denorm, obs_denorm, rmse = model.evaluate(test_loader, device, date_range=date_range, title="Global Model")
     
-    # Forecasting
-    fc_X_df = pd.read_csv(f"{DATA_DIR}\\forecast_global_input_X.csv")
-    fc_Y_df = pd.read_csv(f"{DATA_DIR}\\forecast_global_input_Y.csv")
-    fc_X = fc_X_df.values
-    fc_Y = fc_Y_df.values.squeeze()
+    # # Forecasting phase
+    # fc_X_df = pd.read_csv(f"{DATA_DIR}\\forecast_global_input_X.csv")
+    # fc_Y_df = pd.read_csv(f"{DATA_DIR}\\forecast_global_input_Y.csv")
+    # fc_X = fc_X_df.values
+    # fc_Y = fc_Y_df.values.squeeze()
+    
+    # Start forecast from day after test period ends
     forecast_start_date = date_range[-1] + pd.Timedelta(days=1)
-    model.forecast(fc_X, fc_Y, SEQ_LEN, BATCH_SIZE, device, start_date=forecast_start_date, title="Global Forecast")
+    fc_preds_denorm, fc_obs_denorm, fc_rmse = model.forecast(fc_X_df, fc_Y_df, SEQ_LEN, BATCH_SIZE, device, 
+                                                           start_date=forecast_start_date, title="Global Forecast")
 
+if __name__ == "__main__":
+    main()
+    
