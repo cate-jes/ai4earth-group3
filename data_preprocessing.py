@@ -6,9 +6,7 @@ import datetime as dt
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
-import os
-path = #...
-dir_list = os.listdir(path)
+
 #print("Files and directories in '", path, "' :")
 # prints all files
 #print(dir_list)
@@ -71,7 +69,7 @@ def preprocess_data(gridMET, target_temp, dwallin_temp, sites, finetuning_time, 
   target_temp_filled = pd.merge(test_target_temp, test_dwallin, on=["date", "seg_id_nat"], how="left")
   
   #now that we've merged, replace missing values in mean_temp_c
-  target_temp_filled["mean_temp_c"] = np.where(target_temp_filled["mean_temp_c"].isna(), target_temp_filled["dwallin_temp_c"], target_temp_filled["mean_temp_c"])
+  target_temp_filled["max_temp_c"] = np.where(target_temp_filled["max_temp_c"].isna(), target_temp_filled["dwallin_temp_c"], target_temp_filled["max_temp_c"])
   
   #Combine finetune data with target temp
   gridMET_finetune = gridMET[(gridMET['date'] >= finetuning_time["start"]) & (gridMET['date'] <= finetuning_time["end"])]
@@ -174,8 +172,18 @@ def process_data(pretrain_input_data, finetune_input_data, forecast_input_data, 
   pretrain_input_X, pretrain_input_Y, shape = combine_reservoir_driver_data(pretrain_input_data, reservoir_release, site, pretrain_target)
   finetune_input_X, finetune_input_Y, shape = combine_reservoir_driver_data(finetune_input_data, reservoir_release, site, finetune_target)
   forecast_input_X, forecast_input_Y, shape = combine_reservoir_driver_data(forecast_input_data, forecast_release, site, forecast_target)
-  pretrain_site_input_X_train, pretrain_site_input_X_test, pretrain_site_input_Y_train, pretrain_site_input_Y_test = train_test_split(pretrain_input_X, pretrain_input_Y, test_size=0.2, shuffle=False)
-  finetune_site_input_X_train, finetune_site_input_X_test, finetune_site_input_Y_train, finetune_site_input_Y_test = train_test_split(finetune_input_X, finetune_input_Y, test_size=0.2, shuffle=False)
+    
+  test_split_index = int(len(pretrain_input_X) * 0.2)
+
+  pretrain_site_input_X_train = pretrain_input_X.iloc[test_split_index:]
+  pretrain_site_input_X_test = pretrain_input_X.iloc[:test_split_index]
+  pretrain_site_input_Y_train = pretrain_input_Y.iloc[test_split_index:]
+  pretrain_site_input_Y_test = pretrain_input_Y.iloc[:test_split_index]
+
+  finetune_site_input_X_train = finetune_input_X.iloc[test_split_index:]
+  finetune_site_input_X_test = finetune_input_X.iloc[:test_split_index]
+  finetune_site_input_Y_train = finetune_input_Y.iloc[test_split_index:]
+  finetune_site_input_Y_test = finetune_input_Y.iloc[:test_split_index]
 
   x_scaler = StandardScaler()
   y_scaler = StandardScaler()
