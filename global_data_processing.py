@@ -146,57 +146,76 @@ def combine_global_data(input_data, reservoir_release, target_variable=None):
     return site_input_X, site_input_Y, site_input_X.shape
 
 #SCALE AND EXPORT FUNCTION-------------#
-#proces data site-wise, saves the data in a npz file, returns the mean and std of the standardization data to be added to a csv file
-#proces data site-wise, saves the data in a npz file, returns the mean and std of the standardization data to be added to a csv file
 #process data site-wise, saves the data in a npz file, returns the mean and std of the standardization data to be added to a csv file
 def process_global_data(finetune_input_data, forecast_input_data, reservoir_release, forecast_release,
-                     finetune_target, forecast_target, site):
-  
+                     finetune_target, forecast_target):
+    """Process global data and return forecast data for all sites separately"""
+    
+    finetune_input_X, finetune_input_Y, shape = combine_global_data(finetune_input_data, reservoir_release, finetune_target)
+    forecast_input_X, forecast_input_Y, shape = combine_global_data(forecast_input_data, forecast_release, forecast_target)
+    finetune_input_X_train, finetune_input_X_test, finetune_input_Y_train, finetune_input_Y_test = train_test_split(finetune_input_X, finetune_input_Y, test_size=0.2, shuffle=False)
+    print(forecast_input_X.head())
+    
+    # Fit scalers on training data
+    x_scaler = StandardScaler()
+    y_scaler = StandardScaler()
+    
+    # Convert y to numpy arrays
+    npy_finetune_input_Y_train = np.array(finetune_input_Y_train)
+    npy_finetune_input_Y_test = np.array(finetune_input_Y_test)
+    npy_forecast_input_Y = np.array(forecast_input_Y)
+    
+    # Fit scalers
+    x_scaler.fit(finetune_input_X_train)
+    y_scaler.fit(npy_finetune_input_Y_train.reshape(-1, 1))
 
-  finetune_input_X, finetune_input_Y, shape = combine_global_data(finetune_input_data, reservoir_release, finetune_target)
-  forecast_input_X, forecast_input_Y, shape = combine_global_data(forecast_input_data, forecast_release, forecast_target)
-  finetune_input_X_train, finetune_input_X_test, finetune_input_Y_train, finetune_input_Y_test = train_test_split(finetune_input_X, finetune_input_Y, test_size=0.2, shuffle=False)
-  print(forecast_input_X.head())
-  
-  #site from one hot encoding
-  def get_site_column(site_number: int, df: pd.DataFrame) -> str:
-    column_name = f"seg_id_nat_{site_number}"
-    if column_name in df.columns:
-        return column_name
-    else:
-        raise ValueError(f"Site {site_number} not found in DataFrame columns.")
-  
-  column_name = get_site_column(site, forecast_input_X)
-  site_active_rows = forecast_input_X[forecast_input_X[column_name] == 1]
+    # Scale training and test data
+    new_finetune_input_X_train = x_scaler.transform(finetune_input_X_train)
+    new_finetune_input_X_test = x_scaler.transform(finetune_input_X_test)
+    
+    new_finetune_input_Y_train = y_scaler.transform(npy_finetune_input_Y_train.reshape(-1, 1))
+    new_finetune_input_Y_test = y_scaler.transform(npy_finetune_input_Y_test.reshape(-1, 1))
 
-  print("---------filtered forecast data---------")
-  print(site_active_rows.describe())
-  
-  x_scaler = StandardScaler()
-  y_scaler = StandardScaler()
-  #convert y to a numpy array
-  npy_finetune_input_Y_train = np.array(finetune_input_Y_train)
-  npy_finetune_input_Y_test = np.array(finetune_input_Y_test)
+    # Process forecast data for each site
+    forecast_data_by_site = {}
+    
+    # Define site IDs
+    site_ids = [1450, 1565, 1571, 1573, 1641]
+    
+    for site in site_ids:
+        # Get site column for one-hot encoding
+        column_name = f"seg_id_nat_{site}"
+        if column_name in forecast_input_X.columns:
+            # Filter data for this site
+            site_active_rows = forecast_input_X[forecast_input_X[column_name] == 1]
+            
+            if not site_active_rows.empty:
+                print(f"---------filtered forecast data for site {site}---------")
+                print(site_active_rows.describe())
+                
+                # Scale forecast data for this site
+                new_forecast_input_X_site = x_scaler.transform(site_active_rows)
+                new_forecast_input_Y_site = y_scaler.transform(npy_forecast_input_Y.reshape(-1, 1))
+                
+                forecast_data_by_site[site] = {
+                    'X': new_forecast_input_X_site,
+                    'Y': new_forecast_input_Y_site
+                }
+            else:
+                print(f"Warning: No data found for site {site}")
+                forecast_data_by_site[site] = {
+                    'X': np.array([]),
+                    'Y': np.array([])
+                }
+        else:
+            print(f"Warning: Site {site} column not found in forecast data")
+            forecast_data_by_site[site] = {
+                'X': np.array([]),
+                'Y': np.array([])
+            }
 
-  #convert forecast Y
-  npy_forecast_input_Y = np.array(forecast_input_Y)
-  
-  x_scaler.fit(finetune_input_X_train)
-  y_scaler.fit(npy_finetune_input_Y_train.reshape(-1, 1))
-
-  #want to return our mean
-  new_finetune_input_X_train = x_scaler.transform(finetune_input_X_train)
-  new_finetune_input_X_test = x_scaler.transform(finetune_input_X_test)
-
-  new_finetune_input_Y_train = y_scaler.transform(npy_finetune_input_Y_train.reshape(-1, 1))
-  new_finetune_input_Y_test = y_scaler.transform(npy_finetune_input_Y_test.reshape(-1, 1))
-
-  new_forecast_input_X = x_scaler.transform(site_active_rows)
-  new_forecast_input_Y = y_scaler.transform(npy_forecast_input_Y.reshape(-1, 1))
-
-  #return
-  return (new_finetune_input_X_train, new_finetune_input_X_test, new_finetune_input_Y_train, new_finetune_input_Y_test, 
-          new_forecast_input_X, new_forecast_input_Y, x_scaler, y_scaler, shape )
+    return (new_finetune_input_X_train, new_finetune_input_X_test, new_finetune_input_Y_train, new_finetune_input_Y_test, 
+            forecast_data_by_site, x_scaler, y_scaler, shape)
 
 
 def main():
@@ -206,8 +225,8 @@ def main():
     #process forecast data
     full_forecast, full_reservoir_release = preprocess_forecast_data(input_data_finetune, forecast, forecast_reservoir, reservoir_release)
     #combine data and export it.
-    new_finetune_input_X_train, new_finetune_input_X_test, new_finetune_input_Y_train, new_finetune_input_Y_test, new_forecast_input_X, new_forecast_input_Y, x_scaler, y_scaler, shape = process_global_data(
+    new_finetune_input_X_train, new_finetune_input_X_test, new_finetune_input_Y_train, new_finetune_input_Y_test, forecast_data_by_site, x_scaler, y_scaler, shape = process_global_data(
         input_data_finetune, full_forecast, reservoir_release, full_reservoir_release, "mean_temp_c", "max_temp_c"
     )
     
-    return new_finetune_input_X_train, new_finetune_input_X_test, new_finetune_input_Y_train, new_finetune_input_Y_test, new_forecast_input_X, new_forecast_input_Y, x_scaler, y_scaler, shape
+    return new_finetune_input_X_train, new_finetune_input_X_test, new_finetune_input_Y_train, new_finetune_input_Y_test, forecast_data_by_site, x_scaler, y_scaler, shape
