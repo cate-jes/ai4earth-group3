@@ -195,8 +195,8 @@ def train_test_split(X,y,test_percent):
 
   return X_train, X_test, y_train, y_test
 
-pretrain_X_train, pretrain_X_test, pretrain_y_train, pretrain_y_test = train_test_split(data["pretrain_X"], data["pretrain_Y"], 0.2)
-finetune_X_train, finetune_X_test, finetune_y_train, finetune_y_test = train_test_split(data["finetune_X"], data["finetune_Y"], 0.2)
+# pretrain_X_train, pretrain_X_test, pretrain_y_train, pretrain_y_test = train_test_split(data["pretrain_X"], data["pretrain_Y"], 0.2)
+# finetune_X_train, finetune_X_test, finetune_y_train, finetune_y_test = train_test_split(data["finetune_X"], data["finetune_Y"], 0.2)
 
 #Training model
 # Settings
@@ -231,10 +231,10 @@ y_train = y_train_df.values.squeeze()
 X_test  = X_test_df.values
 y_test  = y_test_df.values.squeeze()
 
-X_train = pretrain_X_train
-y_train = pretrain_y_train.squeeze()
-X_test = pretrain_X_test
-y_test = pretrain_y_test.squeeze()
+# X_train = pretrain_X_train
+# y_train = pretrain_y_train.squeeze()
+# X_test = pretrain_X_test
+# y_test = pretrain_y_test.squeeze()
 
 
 
@@ -248,15 +248,15 @@ finetune_y_train = finetune_y_train_df.values.squeeze()
 finetune_X_test = finetune_X_test_df.values
 finetune_y_test = finetune_y_test_df.values.squeeze()
 
-finetune_X_mean = data["finetune_X"].mean(axis=0)
-finetune_X_std = data["finetune_X"].std(axis=0)
-finetune_y_mean = data["finetune_Y"].mean()
-finetune_y_std = data["finetune_Y"].std()
+# finetune_X_mean = data["finetune_X"].mean(axis=0)
+# finetune_X_std = data["finetune_X"].std(axis=0)
+# finetune_y_mean = data["finetune_Y"].mean()
+# finetune_y_std = data["finetune_Y"].std()
 
-finetune_X_train = (finetune_X_train - finetune_X_mean) / finetune_X_std
-finetune_X_test = (finetune_X_test - finetune_X_mean) / finetune_X_std
-finetune_y_train = (finetune_y_train - finetune_y_mean) / finetune_y_std
-finetune_y_test = (finetune_y_test - finetune_y_mean) / finetune_y_std
+# finetune_X_train = (finetune_X_train - finetune_X_mean) / finetune_X_std
+# finetune_X_test = (finetune_X_test - finetune_X_mean) / finetune_X_std
+# finetune_y_train = (finetune_y_train - finetune_y_mean) / finetune_y_std
+# finetune_y_test = (finetune_y_test - finetune_y_mean) / finetune_y_std
 
 
 # 3) Build sequences
@@ -426,6 +426,7 @@ fc_loader = DataLoader(fc_ds, batch_size=BATCH_SIZE, shuffle=False)
 
 obs, preds = eval_model(model, fc_loader, DEVICE)
 obs = obs * std + mean
+preds = preds *std + mean
 # pred = pred_norm * std + mean
 
 print(obs)
