@@ -175,6 +175,26 @@ def process_global_data(finetune_input_data, forecast_input_data, reservoir_rele
     
     new_finetune_input_Y_train = y_scaler.transform(npy_finetune_input_Y_train.reshape(-1, 1))
     new_finetune_input_Y_test = y_scaler.transform(npy_finetune_input_Y_test.reshape(-1, 1))
+    
+    # Remove any remaining NaN values from training and test data
+    print(f"Before NaN removal: X_train: {new_finetune_input_X_train.shape}, Y_train: {new_finetune_input_Y_train.shape}")
+    print(f"NaN count in X_train: {np.isnan(new_finetune_input_X_train).sum()}")
+    print(f"NaN count in Y_train: {np.isnan(new_finetune_input_Y_train).sum()}")
+    
+    # Find rows with NaN in either X or Y for training data
+    train_mask = ~(np.isnan(new_finetune_input_X_train).any(axis=1) | np.isnan(new_finetune_input_Y_train).any(axis=1))
+    new_finetune_input_X_train = new_finetune_input_X_train[train_mask]
+    new_finetune_input_Y_train = new_finetune_input_Y_train[train_mask]
+    
+    # Find rows with NaN in either X or Y for test data
+    test_mask = ~(np.isnan(new_finetune_input_X_test).any(axis=1) | np.isnan(new_finetune_input_Y_test).any(axis=1))
+    new_finetune_input_X_test = new_finetune_input_X_test[test_mask]
+    new_finetune_input_Y_test = new_finetune_input_Y_test[test_mask]
+    
+    print(f"After NaN removal: X_train: {new_finetune_input_X_train.shape}, Y_train: {new_finetune_input_Y_train.shape}")
+    print(f"After NaN removal: X_test: {new_finetune_input_X_test.shape}, Y_test: {new_finetune_input_Y_test.shape}")
+    print(f"NaN count in X_train: {np.isnan(new_finetune_input_X_train).sum()}")
+    print(f"NaN count in Y_train: {np.isnan(new_finetune_input_Y_train).sum()}")
 
     # Process forecast data for each site
     forecast_data_by_site = {}
@@ -193,9 +213,15 @@ def process_global_data(finetune_input_data, forecast_input_data, reservoir_rele
                 print(f"---------filtered forecast data for site {site}---------")
                 print(site_active_rows.describe())
                 
+                # Get the indices for this site to filter Y data accordingly
+                site_indices = forecast_input_X[forecast_input_X[column_name] == 1].index
+                site_forecast_Y = forecast_input_Y.iloc[site_indices]
+                
                 # Scale forecast data for this site
                 new_forecast_input_X_site = x_scaler.transform(site_active_rows)
-                new_forecast_input_Y_site = y_scaler.transform(npy_forecast_input_Y.reshape(-1, 1))
+                new_forecast_input_Y_site = y_scaler.transform(np.array(site_forecast_Y).reshape(-1, 1))
+                
+                print(f"Site {site} - X shape: {new_forecast_input_X_site.shape}, Y shape: {new_forecast_input_Y_site.shape}")
                 
                 forecast_data_by_site[site] = {
                     'X': new_forecast_input_X_site,

@@ -48,7 +48,6 @@ def plot_results(date_range, observations, predictions, title, rmse, site):
     plt.tight_layout()
     plt.show()
 
-# LSTM Model
 class GlobalStreamTempLSTM(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers, dropout=0.0, y_scaler=None):
         super().__init__()
@@ -80,6 +79,17 @@ class GlobalStreamTempLSTM(nn.Module):
         model_rmse_history = []
         persistence_rmse_history = []
         
+        # Debug: Check training data for NaNs/Infs
+        print("Checking training data for NaNs/Infs...")
+        for i, (Xb, Yb) in enumerate(train_loader):
+            if torch.isnan(Xb).any() or torch.isinf(Xb).any():
+                print(f"NaN/Inf found in training X at batch {i}")
+            if torch.isnan(Yb).any() or torch.isinf(Yb).any():
+                print(f"NaN/Inf found in training Y at batch {i}")
+            if i >= 5:  # Only check first few batches
+                break
+        print("Training data check complete.")
+        
         for epoch in range(1, n_epochs+1):
             epoch_losses = []
             
@@ -87,7 +97,7 @@ class GlobalStreamTempLSTM(nn.Module):
             if device.type == 'cuda':
                 torch.cuda.empty_cache()
                 
-            for Xb, Yb in train_loader:
+            for batch_idx, (Xb, Yb) in enumerate(train_loader):
                 
                 # Move data to GPU
                 Xb, Yb = Xb.to(device), Yb.to(device)
@@ -95,29 +105,50 @@ class GlobalStreamTempLSTM(nn.Module):
                 # Forward pass
                 optimizer.zero_grad()
                 preds = self(Xb)
+                
+                # Check for NaN in predictions
+                if torch.isnan(preds).any():
+                    print(f"NaN in predictions at epoch {epoch}, batch {batch_idx}")
+                    print(f"Input min: {Xb.min():.6f}, max: {Xb.max():.6f}")
+                    print(f"Target min: {Yb.min():.6f}, max: {Yb.max():.6f}")
+                    # Skip this batch
+                    continue
+                
                 loss = loss_func(preds, Yb)
                 
-                # Backward pass
+                # Check for NaN in loss
+                if torch.isnan(loss).any():
+                    print(f"NaN in loss at epoch {epoch}, batch {batch_idx}")
+                    continue
+                
+                # Backward pass with gradient clipping
                 loss.backward()
+                
+                # Gradient clipping to prevent exploding gradients
+                torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
+                
                 optimizer.step()
                 
                 epoch_losses.append(loss.item())
 
             # Calculate model RMSE for this epoch
-            avg_loss = np.mean(epoch_losses)
-            model_rmse = np.sqrt(avg_loss)
-            model_rmse_history.append(model_rmse)
-            
-            # Calculate persistence RMSE if test_loader is provided
-            if test_loader is not None:
-                persistence_rmse = self._calculate_persistence_rmse(test_loader, device)
-                persistence_rmse_history.append(persistence_rmse)
-                print(f"Epoch {epoch} done. - Model RMSE: {model_rmse:.3f}, Persistence RMSE: {persistence_rmse:.3f}")
+            if epoch_losses:  # Only if we have valid losses
+                avg_loss = np.mean(epoch_losses)
+                model_rmse = np.sqrt(avg_loss)
+                model_rmse_history.append(model_rmse)
+                
+                # Calculate persistence RMSE if test_loader is provided
+                if test_loader is not None:
+                    persistence_rmse = self._calculate_persistence_rmse(test_loader, device)
+                    persistence_rmse_history.append(persistence_rmse)
+                    print(f"Epoch {epoch} done. - Model RMSE: {model_rmse:.3f}, Persistence RMSE: {persistence_rmse:.3f}")
+                else:
+                    print(f"Epoch {epoch} done. - Model RMSE: {model_rmse:.3f}")
             else:
-                print(f"Epoch {epoch} done. - Model RMSE: {model_rmse:.3f}")
+                print(f"Epoch {epoch} failed - no valid losses computed")
         
         # Plot RMSE comparison if we have both model and persistence data
-        if test_loader is not None:
+        if test_loader is not None and model_rmse_history:
             self._plot_rmse_comparison(model_rmse_history, persistence_rmse_history)
     
     def _calculate_persistence_rmse(self, test_loader, device):
@@ -254,7 +285,7 @@ def main():
     BATCH_SIZE = 64  # Increased batch size for better GPU utilization
     HIDDEN_SIZE = 64  # Increased model size to better utilize GPU
     N_EPOCHS = 30
-    LEARNING_RATE = 0.001
+    LEARNING_RATE = 0.0001
     NUM_LAYERS = 1  # Number of LSTM layers
     
     #-----------DATA PROCESSING--------#
@@ -267,12 +298,29 @@ def main():
     print(f"Data loaded - Train: {X_train.shape}, Test: {X_test.shape}")
     print(f"Forecast data available for sites: {list(forecast_data_by_site.keys())}")
     
+    # Debug: Check data for NaN/Inf values
+    print("Checking training data for NaN/Inf...")
+    print(f"X_train - NaN: {np.isnan(X_train).any()}, Inf: {np.isinf(X_train).any()}")
+    print(f"X_train min: {np.min(X_train):.6f}, max: {np.max(X_train):.6f}")
+    print(f"Y_train - NaN: {np.isnan(Y_train).any()}, Inf: {np.isinf(Y_train).any()}")
+    print(f"Y_train min: {np.min(Y_train):.6f}, max: {np.max(Y_train):.6f}")
+    print(f"Y_train shape: {Y_train.shape}")
+    print(f"Y_train first 5 values: {Y_train[:5].flatten()}")
+    
     # Build sequences for LSTM input
     print("Creating sequences...")
     X_train_seq, Y_train_seq = reshape_data(X_train, Y_train, SEQ_LEN)
     X_test_seq,  Y_test_seq  = reshape_data(X_test,  Y_test,  SEQ_LEN)
     
     print(f"Sequences created - Train: {X_train_seq.shape}, Test: {X_test_seq.shape}")
+    
+    # Debug: Check sequence data
+    print("Checking sequence data for NaN/Inf...")
+    print(f"X_train_seq - NaN: {np.isnan(X_train_seq).any()}, Inf: {np.isinf(X_train_seq).any()}")
+    print(f"Y_train_seq - NaN: {np.isnan(Y_train_seq).any()}, Inf: {np.isinf(Y_train_seq).any()}")
+    print(f"Y_train_seq min: {np.min(Y_train_seq):.6f}, max: {np.max(Y_train_seq):.6f}")
+    print(f"Y_train_seq shape: {Y_train_seq.shape}")
+    print(f"Y_train_seq first 5 values: {Y_train_seq[:5].flatten()}")
 
     # Create PyTorch DataLoaders for batch processing
     train_ds = TensorDataset(torch.from_numpy(X_train_seq).float(), torch.from_numpy(Y_train_seq).float())
