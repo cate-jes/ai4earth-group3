@@ -15,6 +15,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import torch
+torch.manual_seed(42)
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
@@ -30,14 +31,14 @@ def reshape_data(
         y = y.reshape(-1, 1)
 
     n_samples, n_features = x.shape
-    n_sequences = n_samples - seq_length + 1
+    n_sequences = n_samples - seq_length -1
 
     x_seq = np.zeros((n_sequences, seq_length, n_features), dtype=x.dtype)
     y_seq = np.zeros((n_sequences, 1), dtype=y.dtype)
 
     for i in range(n_sequences):
         x_seq[i] = x[i : i + seq_length]
-        y_seq[i] = y[i + seq_length - 1]
+        y_seq[i] = y[i + seq_length]
 
     return x_seq, y_seq
 
@@ -62,7 +63,7 @@ def plot_results(
     ax.plot(date_range, observations, label="Observation", linewidth=1, linestyle='-', marker='o', markersize=2)
     ax.plot(date_range, predictions, label="Prediction", linewidth=1, linestyle='--', marker='x', markersize=2)
     ax.legend(fontsize='large')
-    ax.set_title(f"Basin {basin} - Test set NSE: {nse:.3f}", fontsize=16)
+    ax.set_title(f"Basin {basin} - Test set RMSE: {nse:.3f}", fontsize=16)
     ax.set_xlabel("", fontsize=14) # Removed x-axis label
     ax.set_ylabel("Temperature (°C)", fontsize=14)
     ax.tick_params(axis='x', rotation=45)
@@ -99,20 +100,30 @@ class LSTMModel(nn.Module):
             batch_first=True,
             dropout=dropout if num_layers > 1 else 0.0
         )
+
         self.dropout = nn.Dropout(p=dropout)
         self.fc = nn.Linear(hidden_size, 1)
+        self.init_weights()
+
+    def init_weights(self):
+        for m in self.modules():
+          if isinstance(m, torch.nn.Linear):
+              nn.init.xavier_normal_(m.weight)
 
     def forward(self, x: torch.Tensor, static: torch.Tensor = None) -> torch.Tensor:
-        if self.static_size > 0:
-            if static is None:
-                raise ValueError("static_size>0 but no static tensor provided")
-            seq_len = x.size(1)
-            static_rep = static.unsqueeze(1).repeat(1, seq_len, 1)
-            x = torch.cat([x, static_rep], dim=-1)
+        # if self.static_size > 0:
+        #     if static is None:
+        #         raise ValueError("static_size>0 but no static tensor provided")
+        #     seq_len = x.size(1)
+        #     static_rep = static.unsqueeze(1).repeat(1, seq_len, 1)
+        #     x = torch.cat([x, static_rep], dim=-1)
 
-        _, (h_n, _) = self.lstm(x)
-        last_hidden = h_n[-1]
-        out = self.fc(self.dropout(last_hidden))
+        out, (h_n, _) = self.lstm(x)
+        out = self.dropout(out)
+        out = self.fc(out)
+        #last_hidden = out[:,-1,:]
+        out = out[:,-1]
+
         return out
 
 #train epoch function
@@ -126,14 +137,19 @@ def train_epoch(
 ):
     model.train()
     pbar = tqdm.tqdm(loader, desc=f"Epoch {epoch}", leave=False)
+    total_loss = 0.0
+
     for xs, ys in pbar:
         xs, ys = xs.to(device), ys.to(device)
         optimizer.zero_grad()
         y_hat = model(xs)
-        loss = loss_func(y_hat, ys)
+        loss = torch.sqrt(loss_func(y_hat, ys))
+        total_loss += loss.item()
         loss.backward()
         optimizer.step()
         pbar.set_postfix_str(f"Loss: {loss.item():.4f}")
+
+    return total_loss / len(loader)
 
 #Evaluating model
 def eval_model(
@@ -153,17 +169,47 @@ def eval_model(
     preds = torch.cat(pred_list).cpu()
     return obs, preds
 
+import matplotlib.pyplot as plt
+
+data = np.load("./1573.npz",allow_pickle=True )
+data.keys()
+
+# Helper function 2
+def train_test_split(X,y,test_percent):
+  numRows = y.shape[0]                     #number or rows in the entire dataset
+  splitPoint = int((1-test_percent)*numRows)  #the row index test_size% of the way through
+  p = np.random.permutation(numRows)   #array for shuffling data
+  X = X[p]
+  y = y[p]
+
+  #Training data array
+  X_test = X[:splitPoint]  # training features
+  y_test = y[:splitPoint]  # training labels
+
+  #Testing data array
+  X_train = X[splitPoint:]  # testing features
+  y_train = y[splitPoint:] # testing labels
+
+  y_train = np.expand_dims(y_train,1)
+  y_test = np.expand_dims(y_test,1)
+
+  return X_train, X_test, y_train, y_test
+
+pretrain_X_train, pretrain_X_test, pretrain_y_train, pretrain_y_test = train_test_split(data["pretrain_X"], data["pretrain_Y"], 0.2)
+finetune_X_train, finetune_X_test, finetune_y_train, finetune_y_test = train_test_split(data["finetune_X"], data["finetune_Y"], 0.2)
+
 #Training model
 # Settings
 DEVICE       = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 DATA_DIR     = './'  # path to your CSV files (Only works for Google Colab IDK for VSCODe)
-BATCH_SIZE   = 100
-SEQ_LEN      = 10
+BATCH_SIZE   = 32
+SEQ_LEN      = 30
 N_EPOCHS     = 50
-HIDDEN_SIZE  = 50
+HIDDEN_SIZE  = 6
 DROPOUT_RATE = 0.1
-LEARNING_RATE= 0.001
-#START_DATE   = '2021-04-16' Don;t know the start date
+PT_LEARNING_RATE= 0.0005
+FT_LEARNING_RATE = 0.0001
+START_DATE   = '2021-04-16'
 FREQ         = 'D'
 BASIN        = 1573
 
@@ -173,21 +219,58 @@ X_test_df  = pd.read_csv(os.path.join(DATA_DIR, 'pretrain_site_input_X_test.csv'
 y_train_df = pd.read_csv(os.path.join(DATA_DIR, 'pretrain_site_input_Y_train.csv'))
 y_test_df  = pd.read_csv(os.path.join(DATA_DIR, 'pretrain_site_input_Y_test.csv'))
 
+
+finetune_X_train_df = pd.read_csv(os.path.join(DATA_DIR, 'finetune_site_input_X_train.csv'))
+finetune_X_test_df  = pd.read_csv(os.path.join(DATA_DIR, 'finetune_site_input_X_test.csv'))
+finetune_y_train_df = pd.read_csv(os.path.join(DATA_DIR, 'finetune_site_input_Y_train.csv'))
+finetune_y_test_df  = pd.read_csv(os.path.join(DATA_DIR, 'finetune_site_input_Y_test.csv'))
+
 # 2) Convert to NumPy
 X_train = X_train_df.values
 y_train = y_train_df.values.squeeze()
 X_test  = X_test_df.values
 y_test  = y_test_df.values.squeeze()
 
+X_train = pretrain_X_train
+y_train = pretrain_y_train.squeeze()
+X_test = pretrain_X_test
+y_test = pretrain_y_test.squeeze()
+
+
+
+finetune_X_train = finetune_X_train_df.values
+finetune_y_train = finetune_y_train_df.values.squeeze()
+finetune_X_test  = finetune_X_test_df.values
+finetune_y_test  = finetune_y_test_df.values.squeeze()
+
+finetune_X_train = finetune_X_train_df.values
+finetune_y_train = finetune_y_train_df.values.squeeze()
+finetune_X_test = finetune_X_test_df.values
+finetune_y_test = finetune_y_test_df.values.squeeze()
+
+finetune_X_mean = data["finetune_X"].mean(axis=0)
+finetune_X_std = data["finetune_X"].std(axis=0)
+finetune_y_mean = data["finetune_Y"].mean()
+finetune_y_std = data["finetune_Y"].std()
+
+finetune_X_train = (finetune_X_train - finetune_X_mean) / finetune_X_std
+finetune_X_test = (finetune_X_test - finetune_X_mean) / finetune_X_std
+finetune_y_train = (finetune_y_train - finetune_y_mean) / finetune_y_std
+finetune_y_test = (finetune_y_test - finetune_y_mean) / finetune_y_std
+
+
 # 3) Build sequences
 X_train_seq, y_train_seq = reshape_data(X_train, y_train, SEQ_LEN)
 X_test_seq,  y_test_seq  = reshape_data(X_test,  y_test,  SEQ_LEN)
 
+finetune_X_train_seq, finetune_y_train_seq = reshape_data(finetune_X_train, finetune_y_train, SEQ_LEN)
+finetune_X_test_seq,  finetuney_y_test_seq  = reshape_data(finetune_X_test,  finetune_y_test,  SEQ_LEN)
+
 # 4) Standardize targets
-from sklearn.preprocessing import StandardScaler
-y_scaler = StandardScaler()
-y_train_seq = y_scaler.fit_transform(y_train_seq)
-y_test_seq  = y_scaler.transform(y_test_seq)
+# from sklearn.preprocessing import StandardScaler
+# y_scaler = StandardScaler()
+# y_train_seq = y_scaler.fit_transform(y_train_seq)
+# y_test_seq  = y_scaler.transform(y_test_seq)
 
 # 5) DataLoaders
 train_ds = TensorDataset(
@@ -198,76 +281,164 @@ test_ds  = TensorDataset(
     torch.from_numpy(X_test_seq).float(),
     torch.from_numpy(y_test_seq).float()
 )
-train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=False)
-test_loader  = DataLoader(test_ds,  batch_size=BATCH_SIZE, shuffle=False)
+train_loader = DataLoader(train_ds, batch_size=16, shuffle=True)
+test_loader  = DataLoader(test_ds,  batch_size=16, shuffle=False)
+
+finetune_train_ds = TensorDataset(
+    torch.from_numpy(finetune_X_train_seq).float(),
+    torch.from_numpy(finetune_y_train_seq).float()
+)
+
+finetune_test_ds = TensorDataset(
+    torch.from_numpy(finetune_X_test_seq).float(),
+    torch.from_numpy(finetuney_y_test_seq).float()
+)
+
+
+finetune_train_loader = DataLoader(finetune_train_ds, batch_size=BATCH_SIZE, shuffle=True)
+finetune_test_loader = DataLoader(finetune_test_ds, batch_size=BATCH_SIZE, shuffle=False)
+
+# for x, y in finetune_test_loader:
+#   print(x.isnan())
+#   print(y.isnan())
 
 # 6) Model, optimizer, loss
-model     = LSTMModel(input_size=X_train_seq.shape[2], hidden_size=HIDDEN_SIZE, dropout=DROPOUT_RATE).to(DEVICE)
-optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+model = LSTMModel(input_size=X_train_seq.shape[2], hidden_size=HIDDEN_SIZE, dropout=DROPOUT_RATE).to(DEVICE)
+optimizer = optim.Adam(model.parameters(), lr=PT_LEARNING_RATE)
 loss_func = nn.MSELoss()
-
+val_loss = []
 # 7) Training loop
+
+criterion = nn.MSELoss()
+train_loss = []
 for epoch in range(1, N_EPOCHS+1):
-    train_epoch(model, optimizer, train_loader, loss_func, epoch, DEVICE)
+    trainloss = train_epoch(model, optimizer, train_loader, loss_func, epoch, DEVICE)
+    train_loss.append(trainloss)
     obs, preds = eval_model(model, test_loader, DEVICE)
-    preds_rescaled = y_scaler.inverse_transform(preds.numpy())
-    obs_rescaled   = y_scaler.inverse_transform(obs.numpy())
-    nse_val = calc_rmse(obs_rescaled.squeeze(), preds_rescaled.squeeze())
-    tqdm.tqdm.write(f"Epoch {epoch:02d} — Test RMSE: {nse_val:.3f}")
+    #preds_rescaled = y_scaler.inverse_transform(preds.numpy())
+    #obs_rescaled   = y_scaler.inverse_transform(obs.numpy())
+    rmse_norm = torch.sqrt(loss_func(preds, obs))
+    #rmse_norm = calc_rmse(obs.numpy().squeeze(), preds.numpy().squeeze())
+
+    val_loss.append(rmse_norm)
+    # with torch.no_grad():
+    #     for xs, ys in test_loader:
+
+    #         xs = xs.to(DEVICE)
+    #         y_hat = model(xs)
+    #         obs.append(ys)
+    #         val_loss.append(y_hat.cpu())
+    #     rmse_norm = calc_rmse(obs.numpy().squeeze(), preds.numpy().squeeze())
+    tqdm.tqdm.write(f"Epoch {epoch:02d} — Train RMSE: {trainloss:.3f} - Test RMSE: {rmse_norm:.3f}")
+
+finetune_val_loss = []
+optimizer = optim.Adam(model.parameters(), lr=FT_LEARNING_RATE)
+
+f_train_loss = []
+for epoch in range(1, 100):
+    f_trainloss = train_epoch(model, optimizer, finetune_train_loader, loss_func, epoch, DEVICE)
+    f_train_loss.append(f_trainloss)
+    # print(train_epoch(model, optimizer, finetune_train_loader, loss_func, epoch, DEVICE))
+    obs, preds = eval_model(model, finetune_test_loader, DEVICE)
+    #preds_rescaled = y_scaler.inverse_transform(preds.numpy())
+    #obs_rescaled   = y_scaler.inverse_transform(obs.numpy())
+    #rmse_norm = calc_rmse(obs.numpy().squeeze(), preds.numpy().squeeze())
+    rmse_norm = torch.sqrt(loss_func(preds, obs))
+    finetune_val_loss.append(rmse_norm)
+    # with torch.no_grad():
+    #     for xs, ys in test_loader:
+
+    #         xs = xs.to(DEVICE)
+    #         y_hat = model(xs)
+    #         obs.append(ys)
+    #         val_loss.append(y_hat.cpu())
+    #     rmse_norm = calc_rmse(obs.numpy().squeeze(), preds.numpy().squeeze())
+    tqdm.tqdm.write(f"Epoch {epoch:02d} — Finetune Train RMSE: {f_trainloss:.3f} - Finetune Test RMSE: {rmse_norm:.3f}")
+plt.figure()
+plt.plot(train_loss)
+plt.plot(val_loss)
+
+plt.figure()
+plt.plot(f_train_loss)
+plt.plot(finetune_val_loss)
+
+    # nse_val = calc_rmse(obs_rescaled.squeeze(), preds_rescaled.squeeze())
+    # tqdm.tqdm.write(f"Epoch {epoch:02d} — Test RMSE: {nse_val:.3f}")
 
 # 8) Plot results
 # generate a date range for plotting
-date_range = pd.date_range(start=START_DATE, periods=len(obs_rescaled), freq=FREQ)
-plot_results(date_range, obs_rescaled.squeeze(), preds_rescaled.squeeze(), BASIN, nse_val)
+date_range = pd.date_range(start=START_DATE, periods=len(obs), freq=FREQ)
+#plot_results(date_range, obs_rescaled.squeeze(), preds_rescaled.squeeze(), BASIN, rmse_norm)
+plot_results(date_range, obs.squeeze(), preds.squeeze(), BASIN, rmse_norm)
 
-def main():
+# 1) Load your normalized forecast CSVs
+fc_X_df = pd.read_csv(os.path.join(DATA_DIR, 'new_forecast_site_input_X.csv'))
+fc_Y_df = pd.read_csv(os.path.join(DATA_DIR, 'new_forecast_site_input_Y.csv'))
 
-    # 1) Load your normalized forecast CSVs
-    fc_X_df = pd.read_csv(os.path.join(DATA_DIR, 'forecast_site_input_X.csv'))
-    fc_Y_df = pd.read_csv(os.path.join(DATA_DIR, 'forecast_site_input_Y.csv'))
+# 2) Convert to NumPy arrays
+fc_X = fc_X_df.values
+fc_Y = fc_Y_df.values
 
-    # 2) Convert to NumPy arrays
-    fc_X = fc_X_df.values
-    fc_Y = fc_Y_df.values.squeeze()
+# 3) Build sliding windows
+fc_X_seq, fc_Y_seq = reshape_data(fc_X, fc_Y.reshape(-1,1), SEQ_LEN)
 
-    # 3) Build sliding windows
-    fc_X_seq, fc_Y_seq = reshape_data(fc_X, fc_Y.reshape(-1,1), SEQ_LEN)
+fc_Y_seq = fc_Y_seq.squeeze()
+#print(fc_X_seq[0,-1,-1])
 
-    # 4) DataLoader
-    fc_ds     = TensorDataset(
-        torch.from_numpy(fc_X_seq).float(),
-        torch.from_numpy(fc_Y_seq).float()
-    )
-    fc_loader = DataLoader(fc_ds, batch_size=BATCH_SIZE, shuffle=False)
+p_rmse_fc = 0.0
 
-    # 5) Inference
-    model.eval()
-    pred_norm, obs_norm = [], []
-    with torch.no_grad():
-        for xs, ys in fc_loader:
-            xs = xs.to(DEVICE)
-            yhat = model(xs)
-            pred_norm.append(yhat.cpu())
-            obs_norm.append(ys)
-    pred_norm = torch.cat(pred_norm).numpy().squeeze()
-    obs_norm  = torch.cat(obs_norm).numpy().squeeze()
+# print(fc_Y_seq.shape)
+# print(fc_X_seq.shape)
+std = 7.47
+mean = 10.07
 
-    # 6) Inverse‐scale
-    preds = y_scaler.inverse_transform(pred_norm.reshape(-1,1)).squeeze()
-    obs   = y_scaler.inverse_transform(obs_norm.reshape(-1,1)).squeeze()
-
-    # 7) Metrics & plot
-    rmse_fc = calc_rmse(obs, preds)
-    print(f"7-day Forecast RMSE: {rmse_fc:.3f}")
-
-    last_test_date = date_range[-1]
-    forecast_dates = pd.date_range(
-        start=last_test_date + pd.Timedelta(days=1),
-        periods=len(preds),
-        freq=FREQ
-    )
-    plot_results(forecast_dates, obs, preds, BASIN, rmse_fc)
+for i in range(len(fc_X_seq)):
+  persistent = fc_X_seq[i,-1,-1]
+  target = fc_Y_seq[i]
+  persistent= persistent * std + mean
+  target = target * std + mean
+  #print(f"Persistent: {persistent:.2f}, Target: {target:.2f}")
+  p_rmse_fc += calc_rmse(target, persistent)
 
 
-if __name__ == "__main__":
-    main()
+p_rmse_fc /= len(fc_X_seq)
+print(p_rmse_fc)
+
+# 4) DataLoader
+fc_ds   = TensorDataset(
+    torch.from_numpy(fc_X_seq).float(),
+    torch.from_numpy(fc_Y_seq).float()
+)
+fc_loader = DataLoader(fc_ds, batch_size=BATCH_SIZE, shuffle=False)
+
+# 5) Inference
+# model.eval()
+# pred_norm, obs_norm = [], []
+# with torch.no_grad():
+#     for xs, ys in fc_loader:
+#         xs = xs.to(DEVICE)
+
+#         yhat = model(xs)
+#         pred_norm.append(yhat.cpu())
+#         obs_norm.append(ys)
+# pred_norm = torch.cat(pred_norm).numpy().squeeze()
+# obs_norm  = torch.cat(obs_norm).numpy().squeeze()
+
+obs, preds = eval_model(model, fc_loader, DEVICE)
+obs = obs * std + mean
+# pred = pred_norm * std + mean
+
+print(obs)
+print(preds)
+rmse_norm = calc_rmse(obs.numpy().squeeze(), preds.numpy().squeeze())
+#print(rmse_norm)
+
+# 7) Metrics & plot
+
+last_test_date = date_range[-1]
+forecast_dates = pd.date_range(
+    start=last_test_date + pd.Timedelta(days=1),
+    periods=len(obs),
+    freq=FREQ
+)
+plot_results(forecast_dates, obs, preds, BASIN, rmse_norm)
