@@ -81,7 +81,7 @@ def eval_model(
 
 # Utility: reshape data for LSTM (original 2-value return for compatibility)
 def reshape_data(x, y, seq_length):
-    """Reshape data for LSTM input - improved version from streamtemplstm"""
+    """Reshape data for LSTM input"""
     if y.ndim == 1:
         y = y.reshape(-1, 1)
 
@@ -174,11 +174,7 @@ class GlobalStreamTempLSTM(nn.Module):
         
     def forward(self, x, static=None):
         # Handle static features if provided
-        if self.static_size > 0 and static is not None:
-            seq_len = x.size(1)
-            static_rep = static.unsqueeze(1).repeat(1, seq_len, 1)
-            x = torch.cat([x, static_rep], dim=-1)
-            
+           
         out, (h_n, _) = self.lstm(x)
         out = self.dropout(out)
         out = self.fc(out)
@@ -193,17 +189,6 @@ class GlobalStreamTempLSTM(nn.Module):
         # Store RMSE values for plotting
         train_rmse_history = []
         test_rmse_history = []
-        
-        # Debug: Check training data for NaNs/Infs
-        print("Checking training data for NaNs/Infs...")
-        for i, (Xb, Yb) in enumerate(train_loader):
-            if torch.isnan(Xb).any() or torch.isinf(Xb).any():
-                print(f"NaN/Inf found in training X at batch {i}")
-            if torch.isnan(Yb).any() or torch.isinf(Yb).any():
-                print(f"NaN/Inf found in training Y at batch {i}")
-            if i >= 5:  # Only check first few batches
-                break
-        print("Training data check complete.")
         
         for epoch in range(1, n_epochs+1):
             # Clear GPU cache before each epoch
@@ -355,87 +340,17 @@ class GlobalStreamTempLSTM(nn.Module):
         
         print(f"Original forecast data shapes: X={fc_X.shape}, Y={fc_Y.shape}")
         
-        # Ensure X and Y have the same length (they should already)
-        min_length = min(len(fc_X), len(fc_Y))
-        fc_X = fc_X[:min_length]
-        fc_Y = fc_Y[:min_length]
+        fc_X_seq, fc_Y_seq = reshape_data(fc_X, fc_Y, seq_len)
         
-        # Adaptive sequence length based on available data
-        max_forecast_days = 7
+        # Remove rows with NaNs - entire sequences are removed if any value is missing
+        mask = ~np.isnan(fc_X_seq).any(axis=(1,2)) & ~np.isnan(fc_Y_seq).any(axis=1)
+        X_train = fc_X_seq[mask]  # Keep only clean sequences
+        Y_train = fc_Y_seq[mask].squeeze()  # Remove singleton dimensions
         
-        # Check if we have enough data for the full sequence length
-        required_length_full = seq_len + max_forecast_days - 1  # Ideal: seq_len + 6 more for 7 forecasts
+        fc_X_seq= X_train
+        fc_Y_seq = Y_train
         
-        if min_length < seq_len + 1:  # Need at least seq_len + 1 for one forecast
-            print(f"Error: Not enough data for any forecasting. Need at least {seq_len + 1} days, have {min_length}")
-            return np.array([]), np.array([]), float('inf')
         
-        # Adjust forecast strategy based on available data
-        if min_length < required_length_full:
-            # Use available data and adjust forecast days
-            actual_forecast_days = min_length - seq_len + 1
-            print(f"Limited data: Using {seq_len}-day sequences with {actual_forecast_days} forecast days (max {max_forecast_days} requested)")
-        else:
-            # Use full forecast period
-            actual_forecast_days = max_forecast_days
-            print(f"Using full sequence length: {seq_len} days with {actual_forecast_days} forecast days")
-        
-        # Determine how many forecast sequences we can create
-        n_forecast_sequences = min_length - seq_len + 1
-        actual_forecast_days = min(actual_forecast_days, n_forecast_sequences)
-        
-        print(f"Can create {n_forecast_sequences} sequences, using last {actual_forecast_days} for forecast")
-        print(f"Data shapes for reshape_data: X={fc_X.shape}, Y={fc_Y.shape}")
-        
-        # Create sequences using available data - use a more flexible approach for forecasting
-        if min_length >= seq_len:
-            # Create sequences for forecasting - we can predict the last available values
-            fc_X_seq = []
-            fc_Y_seq = []
-            
-            # For forecasting, we want to use all available data efficiently
-            # Create overlapping sequences that allow us to predict recent values
-            for i in range(min_length - seq_len + 1):
-                if i + seq_len < min_length:  # Ensure we have a target
-                    sequence = fc_X[i:i + seq_len]
-                    target = fc_Y[i + seq_len]
-                    
-                    # Check for NaNs in this sequence
-                    if not np.isnan(sequence).any() and not np.isnan(target).any():
-                        fc_X_seq.append(sequence)
-                        fc_Y_seq.append(target)
-            
-            if len(fc_X_seq) > 0:
-                fc_X_seq = np.array(fc_X_seq)
-                fc_Y_seq = np.array(fc_Y_seq)
-                if fc_Y_seq.ndim == 2 and fc_Y_seq.shape[1] == 1:
-                    fc_Y_seq = fc_Y_seq.squeeze()  # Only squeeze if it's safe
-                print(f"After custom sequence creation: X_seq={fc_X_seq.shape}, Y_seq={fc_Y_seq.shape}")
-            else:
-                print("No valid sequences could be created")
-                return np.array([]), np.array([]), float('inf')
-        else:
-            print(f"Insufficient data for {seq_len}-day sequences")
-            return np.array([]), np.array([]), float('inf')
-        
-        # For forecasting, we only need at least one sequence to make predictions
-        # We don't need as many sequences as forecast days
-        available_sequences = len(fc_X_seq)
-        print(f"Available sequences: {available_sequences}, requested forecast days: {actual_forecast_days}")
-        
-        # Use the most recent sequence(s) for forecasting
-        if available_sequences > 0:
-            # Use the last sequence for forecasting
-            fc_X_seq = fc_X_seq[-1:]  # Keep only the most recent sequence
-            if fc_Y_seq.ndim > 0 and len(fc_Y_seq) > 0:
-                fc_Y_seq = fc_Y_seq[-1:]  # Keep corresponding target
-            else:
-                # Create a dummy target with the right shape for TensorDataset
-                fc_Y_seq = np.zeros((1,))  # Single dummy target
-            print(f"Using most recent sequence: X_seq={fc_X_seq.shape}, Y_seq={fc_Y_seq.shape}")
-        
-        print(f"Final shapes for TensorDataset: X_seq={fc_X_seq.shape}, Y_seq={fc_Y_seq.shape}")
-
         # Create data loader for forecast sequences
         fc_ds = TensorDataset(torch.from_numpy(fc_X_seq).float(), torch.from_numpy(fc_Y_seq).float())
         fc_loader = DataLoader(fc_ds, batch_size=batch_size, shuffle=False)
@@ -455,11 +370,12 @@ class GlobalStreamTempLSTM(nn.Module):
         preds = np.concatenate(pred_list).squeeze()
         obs   = np.concatenate(obs_list).squeeze()
         
+        
         # Calculate RMSE on normalized data
         rmse_fc = np.sqrt(np.mean((preds - obs) ** 2))
         print(f"7-day Forecast RMSE: {rmse_fc:.3f}")
         
-        # Calculate persistence baseline using sequence-level approach (like your suggestion)
+        # Calculate persistence baseline using sequence-level approach
         persistence_preds_normalized = []
         persistence_rmse_normalized = 0.0
         
@@ -479,23 +395,6 @@ class GlobalStreamTempLSTM(nn.Module):
         preds_denorm = self.denormalize_predictions(preds)
         obs_denorm = self.denormalize_predictions(obs)
         
-        # Ensure preds_denorm is at least 1D for consistent indexing
-        if preds_denorm.ndim == 0:
-            preds_denorm = np.array([preds_denorm])
-        if obs_denorm.ndim == 0:
-            obs_denorm = np.array([obs_denorm])
-        
-        # Limit forecast to 7 days
-        max_forecast_days = 7
-        if len(preds_denorm) > max_forecast_days:
-            print(f"Limiting forecast from {len(preds_denorm)} days to {max_forecast_days} days")
-            preds_denorm = preds_denorm[:max_forecast_days]
-            obs_denorm = obs_denorm[:max_forecast_days]
-            
-            # Recalculate RMSE for 7-day period
-            rmse_fc = np.sqrt(np.mean((preds[:max_forecast_days] - obs[:max_forecast_days]) ** 2))
-            print(f"7-day limited Forecast RMSE: {rmse_fc:.3f}")
-        
         # Denormalize persistence predictions
         persistence_preds_denorm = self.denormalize_predictions(np.array(persistence_preds_normalized))
         
@@ -503,15 +402,15 @@ class GlobalStreamTempLSTM(nn.Module):
         if persistence_preds_denorm.ndim == 0:
             persistence_preds_denorm = np.array([persistence_preds_denorm])
         
-        if persistence_preds_denorm.size > max_forecast_days:
-            persistence_preds_denorm = persistence_preds_denorm[:max_forecast_days]
         persistence_rmse_denorm = np.sqrt(np.mean((persistence_preds_denorm - obs_denorm) ** 2))
         
         # Create date range for plotting
         forecast_dates = pd.date_range(start=start_date, periods=len(preds_denorm), freq="D")
+        
         # Plot denormalized values with persistence comparison
         plot_results(forecast_dates, obs_denorm, preds_denorm, title=title, rmse=rmse_fc, site=site, 
                     persistence_predictions=persistence_preds_denorm, persistence_rmse=persistence_rmse_denorm)
+        
         return preds_denorm, obs_denorm, rmse_fc
 
 def main():
@@ -543,12 +442,14 @@ def main():
     print(f"Sequences created - Train: {X_train_seq.shape}, Test: {X_test_seq.shape}")
 
     # Create PyTorch DataLoaders for batch processing
-    train_ds = TensorDataset(torch.from_numpy(X_train_seq).float(), torch.from_numpy(Y_train_seq).float())
-    test_ds  = TensorDataset(torch.from_numpy(X_test_seq).float(), torch.from_numpy(Y_test_seq).float())
+    train_ds = TensorDataset(torch.from_numpy(X_train_seq).float(), 
+                             torch.from_numpy(Y_train_seq).float())
+    test_ds  = TensorDataset(torch.from_numpy(X_test_seq).float(), 
+                             torch.from_numpy(Y_test_seq).float())
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, 
-                             num_workers=0, pin_memory=True)  # Optimized for GPU
+                             num_workers=0, pin_memory=True)
     test_loader  = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False, 
-                             num_workers=0, pin_memory=True)   # Optimized for GPU
+                             num_workers=0, pin_memory=True)
 
     # Initialize model with y_scaler for denormalization, optimizer, and loss function
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -781,7 +682,7 @@ def plot_7day_rmse_comparison(daily_rmse_data):
     plt.savefig(filepath, dpi=300, bbox_inches='tight')
     print(f"7-day RMSE comparison plot saved: {filepath}")
     
-    #plt.show()
+    # plt.show()
 
 if __name__ == "__main__":
     main()
