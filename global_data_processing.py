@@ -7,7 +7,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 
 import os
-path = './data'
+path = '../data'
 dir_list = os.listdir(path)
 #print("Files and directories in '", path, "' :")
 # prints all files
